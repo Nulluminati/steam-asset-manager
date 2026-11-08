@@ -23,7 +23,14 @@ The approved UI layout is `docs/mockup-main-screen.png`.
 - `src/main.rs`: starts the iced app.
 - `src/lib.rs`: declares the library modules, so tests and `main.rs` share
   them and unused public items do not fail clippy.
-- `src/app.rs`: iced `State`, `Message`, `update`, `view`.
+- `src/app.rs`: the iced `State`, `Message`, `update` and `view`, plus
+  `Services` (keys, Steam environment, HTTP base URLs, config path) so tests
+  replace every outside dependency. `State::boot` returns the start-up
+  `Task`; `load_library` reads the config, the Steam root, the account,
+  installed games, shortcuts and owned games, and reports a failure in the
+  status line. Each panel action returns a `Task` and sets the busy flag.
+  `Message::ApplyPressed` writes through `grid::write_asset`. `view` is a
+  placeholder until card 7.
 - `src/ui/`: `library.rs`, `detail.rs`, `panel.rs`, `settings.rs`.
 - `src/assets.rs`: `AssetKind`.
 - `src/steam/`: `paths.rs`, `users.rs`, `library.rs`, `owned.rs`,
@@ -57,7 +64,7 @@ The approved UI layout is `docs/mockup-main-screen.png`.
   manifests. Tests write a `libraryfolders.vdf` that points at them, because
   that file holds absolute paths.
 
-Not written yet: `app.rs`, `ui/`. Update this map when a card adds or moves a module.
+Not written yet: `ui/`. Update this map when a card adds or moves a module.
 
 ## Commands
 
