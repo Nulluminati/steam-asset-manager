@@ -29,19 +29,21 @@ The approved UI layout is `docs/mockup-main-screen.png`.
 - `src/steam/`: `paths.rs`, `users.rs`, `library.rs`, `owned.rs`,
   `shortcuts.rs`, `grid.rs`, `defaults.rs`. `mod.rs` holds `SteamError`
   and the shared text VDF helpers (keys match without regard to case).
-- `src/imaging.rs`: crop and resize.
+- `src/imaging.rs`: crop and resize. `prepare(image, kind)` gives the
+  exact Steam size, or trims a logo's transparent borders.
 - `src/config.rs`, `src/secrets.rs`: settings and API keys.
 - `src/sgdb.rs`: SteamGridDB client.
 - `src/openai.rs`: OpenAI image client.
 - `tests/fixtures/steam/`: a fake Steam root for tests. Account ID
   `39734273` is the most recent user and owns the `shortcuts.vdf` fixture.
+  `appcache/librarycache/` holds app 440 in the flat layout and app 620 in
+  the per-app folder layout (with one content-hash subfolder).
 - `tests/fixtures/libraries/{a,b}/`: two library folders with app
   manifests. Tests write a `libraryfolders.vdf` that points at them, because
   that file holds absolute paths.
 
-Not written yet: `app.rs`, `ui/`, `steam/grid.rs`, `steam/defaults.rs`,
-`imaging.rs`, `config.rs`, `secrets.rs`, `sgdb.rs`, `openai.rs`. Update this
-map when a card adds or moves a module.
+Not written yet: `app.rs`, `ui/`, `config.rs`, `secrets.rs`, `sgdb.rs`,
+`openai.rs`. Update this map when a card adds or moves a module.
 
 ## Commands
 

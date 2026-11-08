@@ -1,5 +1,7 @@
 //! Readers for the files and services that hold Steam data.
 
+pub mod defaults;
+pub mod grid;
 pub mod library;
 pub mod owned;
 pub mod paths;
