@@ -83,7 +83,7 @@ them on Linux, macOS and Windows.
 
 ## OpenAI facts
 
-Read from OpenAI's docs on 2026-11-08:
+Read from OpenAI's docs on 2026-11-07:
 https://developers.openai.com/api/docs/models,
 https://developers.openai.com/api/docs/guides/image-generation and
 https://developers.openai.com/api/reference/resources/images/methods/edit.
@@ -99,7 +99,10 @@ Correct this list when a fact turns out to be wrong.
 - Custom `size` is a `WIDTHxHEIGHT` string. Width and height must be
   multiples of 16. The aspect ratio must be between 1:3 and 3:1. No edge
   may exceed 3840 pixels. Total pixels must be in 655,360 to 8,294,400.
-  Sizes above 2560x1440 are experimental.
+  Sizes above 2560x1440 are experimental. The guide states these rules
+  in a sentence about the 2.5 models. The 2.6 model pages point at the
+  same guide, so custom sizes on 2.6 are inferred until a real request
+  confirms them.
 - Request size per asset kind (each one obeys the rules above; the client
   then runs `imaging::prepare`):
   - Portrait: `832x1248` (exact 2:3, the Steam ratio).
@@ -109,8 +112,8 @@ Correct this list when a fact turns out to be wrong.
 - A transparent background needs `background: "transparent"` plus
   `output_format` `png` or `webp`. The default output format is `png`.
 - Both endpoints take `model`, `prompt`, `n` (1 to 10), `size`,
-  `background` and `output_format`. The edits endpoint also needs at least
-  one `image` file part.
+  `background` and `output_format`; the edits reference page lists them.
+  The edits endpoint also needs at least one `image` file part.
 
 ## Dependency notes
 
