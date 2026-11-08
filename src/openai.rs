@@ -499,6 +499,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forbidden_gives_the_api_message() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "error": {
+                "message": "The model `gpt-image-2.6-sunburst` is not enabled for this organization.",
+                "type": "invalid_request_error",
+                "param": null,
+                "code": "model_not_found"
+            }
+        });
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = OpenAiClient::new(KEY, MODEL, &server.uri());
+        let result = client
+            .generate("a lighthouse at dusk", AssetKind::Hero)
+            .await;
+        match result {
+            Err(OpenAiError::Api { status, message }) => {
+                assert_eq!(status, 403);
+                assert_eq!(
+                    message,
+                    "The model `gpt-image-2.6-sunburst` is not enabled for this organization."
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_result_list_gives_no_images() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = OpenAiClient::new(KEY, MODEL, &server.uri());
+        // The API can return fewer images than asked for. The client returns
+        // what it got, and the app shows a message for an empty list.
+        let result = client
+            .generate("a lighthouse at dusk", AssetKind::Hero)
+            .await
+            .unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
     async fn bad_base64_is_a_decode_error() {
         let server = MockServer::start().await;
         let body = serde_json::json!({"data": [{"b64_json": "not base64!"}]});
