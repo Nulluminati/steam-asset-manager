@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// The OpenAI image model the app uses when the config names none.
-pub const DEFAULT_OPENAI_MODEL: &str = "gpt-image-2";
+pub const DEFAULT_OPENAI_MODEL: &str = "gpt-image-2.6-sunburst";
 
 const FILE_NAME: &str = "config.toml";
 
@@ -101,6 +101,11 @@ mod tests {
         assert_eq!(config, Config::default());
         assert_eq!(config.steam_root, None);
         assert_eq!(config.openai_model, DEFAULT_OPENAI_MODEL);
+    }
+
+    #[test]
+    fn default_model_is_gpt_image_2_6_sunburst() {
+        assert_eq!(DEFAULT_OPENAI_MODEL, "gpt-image-2.6-sunburst");
     }
 
     #[test]
