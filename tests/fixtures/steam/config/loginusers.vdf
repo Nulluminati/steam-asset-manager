@@ -1,0 +1,19 @@
+"users"
+{
+	"76561197960287930"
+	{
+		"AccountName"		"zerocool"
+		"PersonaName"		"Zero Cool"
+		"RememberPassword"		"1"
+		"MostRecent"		"0"
+		"Timestamp"		"1730000000"
+	}
+	"76561198000000001"
+	{
+		"AccountName"		"acidburn"
+		"PersonaName"		"Acid Burn"
+		"RememberPassword"		"1"
+		"MostRecent"		"1"
+		"Timestamp"		"1740000000"
+	}
+}

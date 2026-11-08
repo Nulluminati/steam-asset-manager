@@ -42,7 +42,8 @@ Verify each one against a real Steam install or current community docs before re
   - Windows: registry `HKCU\Software\Valve\Steam\SteamPath` (crate `winreg`), fallback `C:\Program Files (x86)\Steam`.
 - Account: `<root>/config/loginusers.vdf` (text VDF) keys are SteamID64. Account ID = SteamID64 − 76561197960265728. User folder: `<root>/userdata/<accountid>/`.
 - Owned Steam games: `GET https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=<key>&steamid=<SteamID64>&include_appinfo=1&include_played_free_games=1` returns `response.games[]` with `appid` and `name`. The profile's game details must be public, or the key must belong to the same account. Get a key at https://steamcommunity.com/dev/apikey.
-- Installed Steam games: `<root>/steamapps/libraryfolders.vdf` lists library folders. Each folder has `steamapps/appmanifest_<appid>.acf` with `appid` and `name`.
+- Installed Steam games: `<root>/steamapps/libraryfolders.vdf` lists library folders. Each folder has `steamapps/appmanifest_<appid>.acf` with `appid` and `name`. The current format is `"0" { "path" "..." }`; old files use `"1" "D:\\SteamLibrary"`. The root itself is usually entry `"0"`. Paths use escaped backslashes.
+- Text VDF key case is not stable across Steam versions (`MostRecent` and `mostrecent`, `AppName` and `appname`). Match keys without regard to case.
 - Non-Steam shortcuts: `<root>/userdata/<accountid>/config/shortcuts.vdf` (binary VDF). Each entry has `appid` (stored as i32; use it as u32), `AppName`, `Exe`. If `appid` is missing, compute `crc32(Exe + AppName) | 0x80000000`.
 - Grid folder: `<root>/userdata/<accountid>/config/grid/` (create it if missing). File names per asset kind:
   - Portrait capsule 600x900: `<appid>p.png`
