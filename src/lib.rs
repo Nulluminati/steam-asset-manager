@@ -6,3 +6,4 @@ pub mod openai;
 pub mod secrets;
 pub mod sgdb;
 pub mod steam;
+pub mod ui;

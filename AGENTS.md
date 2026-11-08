@@ -33,8 +33,24 @@ The approved UI layout is `docs/mockup-main-screen.png`.
   carries the appid and `AssetKind` the images were made for: a reply that
   no longer matches the selection or target is dropped, and
   `Message::ApplyPressed` writes with that stored pair, never with the slot
-  the user looks at now. `view` is a placeholder until card 7.
-- `src/ui/`: `library.rs`, `detail.rs`, `panel.rs`, `settings.rs`.
+  the user looks at now. Selecting an entry (and each library reload)
+  starts a `Task` that loads the art of all four slots (`load_slot_art`:
+  custom grid file, else Steam's default art, else empty) into
+  `Message::SlotArtLoaded`; a reply for another entry is dropped. Apply
+  puts the written image in its slot. Modify needs art in the target slot.
+  `Message::SettingsSaved` writes only the changed keys, saves the config,
+  then reloads the library; a failure keeps the dialog open. `view` calls
+  `ui::view`.
+- `src/ui/`: the iced views. `mod.rs` holds `theme` (dark, steel blue
+  accent) and `view` (library, detail and panel in a row; the settings
+  dialog in a `stack` on top). `library.rs` (search box, rows with
+  `tag_text` and `install_note`), `detail.rs` (`SlotArt`, `slot_caption`,
+  the four slot frames; a click on a frame sets the target), `panel.rs`
+  (tabs, `TargetOption` dropdown, prompt `text_editor`, action button,
+  2x2 candidates; `modify_enabled`, `action_label`), `settings.rs`
+  (`SettingsForm`: key inputs prefilled from `Secrets::get_key`,
+  `changed_keys`, `to_config`). Keep view code thin and unit-test the
+  helpers that decide what a view shows.
 - `src/assets.rs`: `AssetKind`.
 - `src/steam/`: `paths.rs`, `users.rs`, `library.rs`, `owned.rs`,
   `shortcuts.rs`, `grid.rs`, `defaults.rs`. `mod.rs` holds `SteamError`
@@ -67,7 +83,7 @@ The approved UI layout is `docs/mockup-main-screen.png`.
   manifests. Tests write a `libraryfolders.vdf` that points at them, because
   that file holds absolute paths.
 
-Not written yet: `ui/`. Update this map when a card adds or moves a module.
+Update this map when a card adds or moves a module.
 
 ## Commands
 

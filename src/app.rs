@@ -1,9 +1,11 @@
 //! The iced application: state, messages and the update loop.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use iced::widget::{column, text};
+use iced::widget::image::Handle;
+use iced::widget::text_editor;
 use iced::{Element, Task};
 use image::DynamicImage;
 
@@ -17,6 +19,8 @@ use crate::steam::library::{LibraryEntry, sort_entries};
 use crate::steam::paths::{self, PathEnv, SystemEnv};
 use crate::steam::users::SteamUser;
 use crate::steam::{grid, owned, shortcuts, users};
+use crate::ui::detail::SlotArt;
+use crate::ui::settings::{SettingsField, SettingsForm};
 
 /// The tab of the right panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +132,19 @@ pub enum Message {
     },
     /// The user applied the candidate at this index.
     ApplyPressed(usize),
+    /// The Target dropdown: it sets the target and keeps the tab.
+    TargetSelected(AssetKind),
+    /// An edit in the multi-line prompt box.
+    PromptEdited(text_editor::Action),
+    /// The current art of the slots of one entry finished loading.
+    SlotArtLoaded {
+        appid: u32,
+        art: Vec<(AssetKind, SlotArt)>,
+    },
+    SettingsOpened,
+    SettingsClosed,
+    SettingsChanged(SettingsField, String),
+    SettingsSaved,
 }
 
 pub struct State {
@@ -142,10 +159,18 @@ pub struct State {
     tab: PanelTab,
     prompt: String,
     candidates: Vec<DynamicImage>,
+    /// The images the view shows for `candidates`, in the same order.
+    candidate_handles: Vec<Handle>,
     /// The entry and the slot the candidates were made for.
     candidate_context: Option<(u32, AssetKind)>,
     busy: bool,
     status: Option<Status>,
+    /// The current art of each slot of the selected entry.
+    slot_art: HashMap<AssetKind, SlotArt>,
+    /// The text of the prompt box; `prompt` holds the same text.
+    prompt_editor: text_editor::Content,
+    /// The open settings dialog.
+    settings: Option<SettingsForm>,
 }
 
 impl State {
@@ -162,9 +187,13 @@ impl State {
             tab: PanelTab::SteamGridDb,
             prompt: String::new(),
             candidates: Vec::new(),
+            candidate_handles: Vec::new(),
             candidate_context: None,
             busy: false,
             status: None,
+            slot_art: HashMap::new(),
+            prompt_editor: text_editor::Content::new(),
+            settings: None,
         }
     }
 
@@ -217,6 +246,28 @@ impl State {
         &self.candidates
     }
 
+    pub fn candidate_handles(&self) -> &[Handle] {
+        &self.candidate_handles
+    }
+
+    /// The current art of one slot of the selected entry.
+    pub fn slot_art(&self, kind: AssetKind) -> &SlotArt {
+        self.slot_art.get(&kind).unwrap_or(&SlotArt::Empty)
+    }
+
+    /// Modify needs a current image in the target slot.
+    pub fn can_modify(&self) -> bool {
+        crate::ui::panel::modify_enabled(self.slot_art(self.target))
+    }
+
+    pub fn prompt_editor(&self) -> &text_editor::Content {
+        &self.prompt_editor
+    }
+
+    pub fn settings(&self) -> Option<&SettingsForm> {
+        self.settings.as_ref()
+    }
+
     pub fn busy(&self) -> bool {
         self.busy
     }
@@ -251,7 +302,7 @@ impl State {
         })
     }
 
-    fn apply_loaded(&mut self, loaded: LoadedLibrary) {
+    fn apply_loaded(&mut self, loaded: LoadedLibrary) -> Task<Message> {
         self.config = loaded.config;
         self.steam_root = loaded.steam_root;
         self.account_id = loaded.account_id;
@@ -261,21 +312,114 @@ impl State {
         if self.selected_entry().is_none() {
             self.selected = None;
             self.drop_candidates();
+            self.slot_art.clear();
+            return Task::none();
         }
+        // The Steam folder can change, so the slot art can change too.
+        self.load_slot_art_task()
     }
 
-    fn select(&mut self, appid: u32) {
-        if self.entries.iter().any(|entry| entry.appid == appid) {
-            self.selected = Some(appid);
-            self.drop_candidates();
-            self.status = None;
+    fn select(&mut self, appid: u32) -> Task<Message> {
+        if !self.entries.iter().any(|entry| entry.appid == appid) {
+            return Task::none();
         }
+        self.selected = Some(appid);
+        self.drop_candidates();
+        self.status = None;
+        self.load_slot_art_task()
+    }
+
+    /// Marks every slot as loading and returns the task that reads the
+    /// current art of the selected entry.
+    fn load_slot_art_task(&mut self) -> Task<Message> {
+        let Some(entry) = self.selected_entry().cloned() else {
+            return Task::none();
+        };
+        let Some(root) = self.steam_root.clone() else {
+            self.slot_art.clear();
+            return Task::none();
+        };
+        self.slot_art = AssetKind::ALL
+            .into_iter()
+            .map(|kind| (kind, SlotArt::Loading))
+            .collect();
+        let appid = entry.appid;
+        let input = SlotArtInput {
+            grid_dir: self
+                .account_id
+                .map(|account_id| grid::grid_dir(&root, account_id)),
+            cache_dir: defaults::library_cache_dir(&root),
+            cdn_base: self.services.steam_cdn_base.clone(),
+            entry,
+        };
+        Task::perform(load_all_slot_art(input), move |art| {
+            Message::SlotArtLoaded { appid, art }
+        })
+    }
+
+    fn apply_slot_art(&mut self, appid: u32, art: Vec<(AssetKind, SlotArt)>) {
+        // The user picked another game while the art loaded.
+        if self.selected != Some(appid) {
+            return;
+        }
+        self.slot_art.extend(art);
     }
 
     /// Forgets the candidates and what they were made for.
     fn drop_candidates(&mut self) {
         self.candidates.clear();
+        self.candidate_handles.clear();
         self.candidate_context = None;
+    }
+
+    fn set_target(&mut self, kind: AssetKind) {
+        // The candidate grid belongs to the old slot.
+        if kind != self.target {
+            self.drop_candidates();
+        }
+        self.target = kind;
+    }
+
+    fn edit_prompt(&mut self, action: text_editor::Action) {
+        self.prompt_editor.perform(action);
+        self.prompt = self.prompt_editor.text();
+    }
+
+    fn set_prompt(&mut self, text: String) {
+        self.prompt_editor = text_editor::Content::with_text(&text);
+        self.prompt = text;
+    }
+
+    fn open_settings(&mut self) {
+        self.settings = Some(SettingsForm::new(&self.services.secrets, &self.config));
+    }
+
+    /// Writes the changed keys and the config, then loads the library
+    /// again. A failure keeps the dialog open with the reason.
+    fn save_settings(&mut self) -> Task<Message> {
+        // The reload would clear the busy flag of a running request.
+        if self.busy {
+            return Task::none();
+        }
+        let Some(form) = self.settings.as_mut() else {
+            return Task::none();
+        };
+        for (service, key) in form.changed_keys() {
+            if let Err(err) = self.services.secrets.set_key(service, key) {
+                form.error = Some(format!("Cannot save the key: {err}"));
+                return Task::none();
+            }
+        }
+        let Some(path) = self.services.config_path.as_deref() else {
+            form.error = Some("Cannot save the settings: the app has no settings folder.".into());
+            return Task::none();
+        };
+        if let Err(err) = form.to_config().save(path) {
+            form.error = Some(format!("Cannot save the settings: {err}"));
+            return Task::none();
+        }
+        self.settings = None;
+        self.start()
     }
 
     fn fail(&mut self, text: impl Into<String>) {
@@ -313,6 +457,7 @@ impl State {
             }
             Ok(images) => {
                 let count = images.len();
+                self.candidate_handles = images.iter().map(image_handle).collect();
                 self.candidates = images;
                 self.candidate_context = Some((appid, kind));
                 self.status = Some(Status::Info(format!(
@@ -338,6 +483,10 @@ impl State {
         // happens to look at now.
         match grid::write_asset(&grid, appid, kind, &image) {
             Ok(path) => {
+                if self.selected == Some(appid) {
+                    self.slot_art
+                        .insert(kind, SlotArt::Custom(image_handle(&image)));
+                }
                 let name = path
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
@@ -413,6 +562,10 @@ impl State {
                 )
             }
             PanelTab::Modify => {
+                if !self.can_modify() {
+                    self.fail("This slot has no current art to modify. Apply art first.");
+                    return Task::none();
+                }
                 let Some(key) = self.services.secrets.get_key(Service::OpenAi) else {
                     self.fail("Set the OpenAI API key in Settings before you make art.");
                     return Task::none();
@@ -461,19 +614,26 @@ impl State {
 
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
-        Message::Loaded(loaded) => state.apply_loaded(*loaded),
+        Message::Loaded(loaded) => return state.apply_loaded(*loaded),
         Message::FilterChanged(text) => state.filter = text,
-        Message::EntrySelected(appid) => state.select(appid),
+        Message::EntrySelected(appid) => return state.select(appid),
         Message::SlotAction(kind, tab) => {
-            // The candidate grid belongs to the old slot.
-            if kind != state.target {
-                state.drop_candidates();
-            }
-            state.target = kind;
+            state.set_target(kind);
             state.tab = tab;
         }
+        Message::TargetSelected(kind) => state.set_target(kind),
         Message::TabSelected(tab) => state.tab = tab,
-        Message::PromptChanged(text) => state.prompt = text,
+        Message::PromptChanged(text) => state.set_prompt(text),
+        Message::PromptEdited(action) => state.edit_prompt(action),
+        Message::SlotArtLoaded { appid, art } => state.apply_slot_art(appid, art),
+        Message::SettingsOpened => state.open_settings(),
+        Message::SettingsClosed => state.settings = None,
+        Message::SettingsChanged(field, value) => {
+            if let Some(form) = state.settings.as_mut() {
+                form.set(field, value);
+            }
+        }
+        Message::SettingsSaved => return state.save_settings(),
         Message::ActionPressed => return state.start_action(),
         Message::CandidatesArrived {
             appid,
@@ -631,21 +791,63 @@ async fn current_image(request: &ModifyRequest) -> Result<DynamicImage, String> 
     }
 }
 
+/// The image the view shows for a decoded image.
+fn image_handle(image: &DynamicImage) -> Handle {
+    let rgba = image.to_rgba8();
+    Handle::from_rgba(rgba.width(), rgba.height(), rgba.into_raw())
+}
+
+/// Where the current art of the slots of one entry lives.
+pub struct SlotArtInput {
+    /// The grid folder; `None` when the app knows no Steam user.
+    pub grid_dir: Option<PathBuf>,
+    pub cache_dir: PathBuf,
+    pub cdn_base: String,
+    pub entry: LibraryEntry,
+}
+
+async fn load_all_slot_art(input: SlotArtInput) -> Vec<(AssetKind, SlotArt)> {
+    let mut art = Vec::new();
+    for kind in AssetKind::ALL {
+        art.push((kind, load_slot_art(&input, kind).await));
+    }
+    art
+}
+
+/// The art one slot shows: the custom file, else Steam's own art, else
+/// nothing. A file that cannot be read counts as no art.
+pub async fn load_slot_art(input: &SlotArtInput, kind: AssetKind) -> SlotArt {
+    let appid = input.entry.appid;
+    let custom = input
+        .grid_dir
+        .as_deref()
+        .and_then(|grid| grid::current_custom(grid, appid, kind));
+    if let Some(path) = custom
+        && let Ok(bytes) = tokio::fs::read(&path).await
+    {
+        return SlotArt::Custom(Handle::from_bytes(bytes));
+    }
+    let art = defaults::default_art(
+        &input.cache_dir,
+        &input.cdn_base,
+        appid,
+        input.entry.source,
+        kind,
+    )
+    .await;
+    let bytes = match art {
+        Ok(Some(DefaultArt::Cached(path))) => tokio::fs::read(&path).await.ok(),
+        Ok(Some(DefaultArt::Downloaded(bytes))) => Some(bytes),
+        Ok(None) | Err(_) => None,
+    };
+    match bytes {
+        Some(bytes) => SlotArt::Default(Handle::from_bytes(bytes)),
+        None => SlotArt::Empty,
+    }
+}
+
 pub fn view(state: &State) -> Element<'_, Message> {
-    let mut content = column![
-        text("steam-asset-manager"),
-        text(format!(
-            "{} games in the library",
-            state.visible_entries().len()
-        )),
-    ];
-    if let Some(status) = state.status() {
-        content = content.push(text(status.text()));
-    }
-    if state.busy() {
-        content = content.push(text("Working..."));
-    }
-    content.into()
+    crate::ui::view(state)
 }
 
 #[cfg(test)]
@@ -663,6 +865,7 @@ mod tests {
     use crate::secrets::{KeyStore, SecretsError};
     use crate::steam::library::EntrySource;
     use crate::steam::paths::Os;
+    use crate::ui::settings::SettingsField;
 
     const ACCOUNT_ID: u32 = 39_734_273;
 
@@ -1485,5 +1688,363 @@ mod tests {
         .unwrap();
         assert_eq!(images.len(), 1);
         assert_eq!((images[0].width(), images[0].height()), (600, 900));
+    }
+
+    fn pixel() -> Handle {
+        Handle::from_rgba(1, 1, vec![0, 0, 0, 255])
+    }
+
+    /// A state with Team Fortress 2 selected and art in the given slots.
+    fn state_with_art(steam_root: Option<PathBuf>, art: Vec<(AssetKind, SlotArt)>) -> State {
+        let mut state = state_with(
+            services(&[(Service::OpenAi, "sk-test")]),
+            steam_root,
+            vec![steam_entry(440, "Team Fortress 2")],
+        );
+        send(&mut state, Message::EntrySelected(440));
+        send(&mut state, Message::SlotArtLoaded { appid: 440, art });
+        state
+    }
+
+    #[test]
+    fn selecting_an_entry_marks_every_slot_as_loading() {
+        let mut state = state_with(
+            services(&[]),
+            Some(PathBuf::from("/steam")),
+            vec![steam_entry(440, "Team Fortress 2")],
+        );
+        for kind in AssetKind::ALL {
+            assert!(matches!(state.slot_art(kind), SlotArt::Empty), "{kind:?}");
+        }
+        send(&mut state, Message::EntrySelected(440));
+        for kind in AssetKind::ALL {
+            assert!(matches!(state.slot_art(kind), SlotArt::Loading), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn slot_art_reply_sets_the_slot_images() {
+        let state = state_with_art(
+            Some(PathBuf::from("/steam")),
+            vec![
+                (AssetKind::Hero, SlotArt::Custom(pixel())),
+                (AssetKind::Portrait, SlotArt::Default(pixel())),
+                (AssetKind::Wide, SlotArt::Empty),
+                (AssetKind::Logo, SlotArt::Empty),
+            ],
+        );
+        assert!(matches!(
+            state.slot_art(AssetKind::Hero),
+            SlotArt::Custom(_)
+        ));
+        assert!(matches!(
+            state.slot_art(AssetKind::Portrait),
+            SlotArt::Default(_)
+        ));
+        assert!(matches!(state.slot_art(AssetKind::Wide), SlotArt::Empty));
+    }
+
+    #[test]
+    fn slot_art_reply_for_another_game_is_dropped() {
+        let mut state = state_with(
+            services(&[]),
+            Some(PathBuf::from("/steam")),
+            vec![
+                steam_entry(440, "Team Fortress 2"),
+                steam_entry(570, "Dota 2"),
+            ],
+        );
+        send(&mut state, Message::EntrySelected(570));
+        send(
+            &mut state,
+            Message::SlotArtLoaded {
+                appid: 440,
+                art: vec![(AssetKind::Hero, SlotArt::Custom(pixel()))],
+            },
+        );
+        assert!(matches!(state.slot_art(AssetKind::Hero), SlotArt::Loading));
+    }
+
+    #[test]
+    fn apply_shows_the_written_art_in_the_slot() {
+        let temp = TempDir::new().unwrap();
+        let mut state = state_with_art(
+            Some(temp.path().to_path_buf()),
+            vec![(AssetKind::Hero, SlotArt::Empty)],
+        );
+        send(
+            &mut state,
+            Message::SlotAction(AssetKind::Hero, PanelTab::SteamGridDb),
+        );
+        send(
+            &mut state,
+            candidates(440, AssetKind::Hero, vec![solid(1920, 620)]),
+        );
+        send(&mut state, Message::ApplyPressed(0));
+        assert!(matches!(
+            state.slot_art(AssetKind::Hero),
+            SlotArt::Custom(_)
+        ));
+    }
+
+    #[test]
+    fn arrived_candidates_have_image_handles() {
+        let mut state = state_with_art(Some(PathBuf::from("/steam")), vec![]);
+        send(
+            &mut state,
+            candidates(440, AssetKind::Portrait, vec![solid(6, 9), solid(6, 9)]),
+        );
+        assert_eq!(state.candidate_handles().len(), 2);
+        send(&mut state, Message::EntrySelected(440));
+        assert!(state.candidate_handles().is_empty());
+    }
+
+    #[test]
+    fn target_dropdown_sets_the_target_and_keeps_the_tab() {
+        let mut state = state_with_art(Some(PathBuf::from("/steam")), vec![]);
+        send(&mut state, Message::TabSelected(PanelTab::Generate));
+        send(
+            &mut state,
+            candidates(440, AssetKind::Portrait, vec![solid(6, 9)]),
+        );
+        send(&mut state, Message::TargetSelected(AssetKind::Logo));
+        assert_eq!(state.target(), AssetKind::Logo);
+        assert_eq!(state.tab(), PanelTab::Generate);
+        assert!(state.candidates().is_empty());
+    }
+
+    #[test]
+    fn modify_without_current_art_shows_an_error() {
+        let mut state = state_with_art(
+            Some(PathBuf::from("/steam")),
+            vec![(AssetKind::Portrait, SlotArt::Empty)],
+        );
+        send(
+            &mut state,
+            Message::SlotAction(AssetKind::Portrait, PanelTab::Modify),
+        );
+        assert!(!state.can_modify());
+        send(&mut state, Message::ActionPressed);
+        assert!(!state.busy());
+        let status = state.status().expect("a status line");
+        assert!(status.is_error());
+        assert!(
+            status.text().contains("no current art"),
+            "{}",
+            status.text()
+        );
+    }
+
+    #[test]
+    fn modify_is_possible_with_default_art() {
+        let state = state_with_art(
+            Some(PathBuf::from("/steam")),
+            vec![(AssetKind::Portrait, SlotArt::Default(pixel()))],
+        );
+        assert!(state.can_modify());
+    }
+
+    #[test]
+    fn prompt_editor_updates_the_prompt() {
+        use iced::widget::text_editor::{Action, Edit};
+
+        let mut state = State::new(services(&[]));
+        send(
+            &mut state,
+            Message::PromptEdited(Action::Edit(Edit::Insert('a'))),
+        );
+        send(
+            &mut state,
+            Message::PromptEdited(Action::Edit(Edit::Insert('b'))),
+        );
+        assert_eq!(state.prompt(), "ab");
+
+        send(&mut state, Message::PromptChanged("knight".to_string()));
+        assert_eq!(state.prompt(), "knight");
+        assert_eq!(state.prompt_editor().text(), "knight");
+    }
+
+    #[test]
+    fn settings_open_with_the_current_values() {
+        let mut state = State::new(services(&[(Service::SteamGridDb, "grid-key")]));
+        assert!(state.settings().is_none());
+        send(&mut state, Message::SettingsOpened);
+        let form = state.settings().expect("an open dialog");
+        assert_eq!(
+            form.value(SettingsField::Key(Service::SteamGridDb)),
+            "grid-key"
+        );
+        assert_eq!(
+            form.value(SettingsField::Model),
+            crate::config::DEFAULT_OPENAI_MODEL
+        );
+    }
+
+    #[test]
+    fn settings_close_discards_the_changes() {
+        let mut state = State::new(services(&[]));
+        send(&mut state, Message::SettingsOpened);
+        send(
+            &mut state,
+            Message::SettingsChanged(SettingsField::Key(Service::OpenAi), "sk-new".to_string()),
+        );
+        send(&mut state, Message::SettingsClosed);
+        assert!(state.settings().is_none());
+        assert_eq!(state.services.secrets.get_key(Service::OpenAi), None);
+    }
+
+    #[test]
+    fn settings_save_writes_the_keys_and_the_config() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let mut services = services(&[(Service::SteamWeb, "old-steam")]);
+        services.config_path = Some(config_path.clone());
+        let mut state = State::new(services);
+
+        send(&mut state, Message::SettingsOpened);
+        send(
+            &mut state,
+            Message::SettingsChanged(SettingsField::Key(Service::OpenAi), "sk-new".to_string()),
+        );
+        send(
+            &mut state,
+            Message::SettingsChanged(SettingsField::Key(Service::SteamWeb), String::new()),
+        );
+        send(
+            &mut state,
+            Message::SettingsChanged(SettingsField::SteamRoot, "/games/Steam".to_string()),
+        );
+        send(
+            &mut state,
+            Message::SettingsChanged(SettingsField::Model, "gpt-image-2.6-flare".to_string()),
+        );
+        send(&mut state, Message::SettingsSaved);
+
+        assert!(state.settings().is_none());
+        let secrets = &state.services.secrets;
+        assert_eq!(secrets.get_key(Service::OpenAi).as_deref(), Some("sk-new"));
+        assert_eq!(secrets.get_key(Service::SteamWeb), None);
+        assert_eq!(
+            Config::load(&config_path).unwrap(),
+            Config {
+                steam_root: Some(PathBuf::from("/games/Steam")),
+                openai_model: "gpt-image-2.6-flare".to_string(),
+            }
+        );
+        // The library loads again with the saved settings.
+        assert!(state.busy());
+    }
+
+    #[test]
+    fn settings_save_failure_keeps_the_dialog_open() {
+        let temp = TempDir::new().unwrap();
+        let mut services = services(&[]);
+        // A folder cannot be written as a file.
+        services.config_path = Some(temp.path().to_path_buf());
+        let mut state = State::new(services);
+
+        send(&mut state, Message::SettingsOpened);
+        send(
+            &mut state,
+            Message::SettingsChanged(SettingsField::Model, "gpt-image-2".to_string()),
+        );
+        send(&mut state, Message::SettingsSaved);
+
+        let form = state.settings().expect("the dialog stays open");
+        assert_eq!(form.value(SettingsField::Model), "gpt-image-2");
+        let error = form.error.as_deref().expect("a save error");
+        assert!(error.contains("Cannot save the settings"), "{error}");
+        assert!(!state.busy());
+    }
+
+    #[test]
+    fn settings_save_waits_for_a_running_request() {
+        let mut state = State::new(services(&[]));
+        send(&mut state, Message::SettingsOpened);
+        state.busy = true;
+        send(&mut state, Message::SettingsSaved);
+        assert!(state.settings().is_some());
+    }
+
+    fn slot_input(grid_dir: Option<PathBuf>, cdn_base: &str, entry: LibraryEntry) -> SlotArtInput {
+        SlotArtInput {
+            grid_dir,
+            cache_dir: fixture_root().join("appcache/librarycache"),
+            cdn_base: cdn_base.to_string(),
+            entry,
+        }
+    }
+
+    #[tokio::test]
+    async fn slot_art_prefers_the_custom_file() {
+        let grid = TempDir::new().unwrap();
+        fs::write(grid.path().join("440_hero.png"), png_bytes(4, 4)).unwrap();
+        let input = slot_input(
+            Some(grid.path().to_path_buf()),
+            "http://127.0.0.1:1",
+            steam_entry(440, "Team Fortress 2"),
+        );
+        let art = load_slot_art(&input, AssetKind::Hero).await;
+        assert!(matches!(art, SlotArt::Custom(_)), "{art:?}");
+    }
+
+    #[tokio::test]
+    async fn slot_art_falls_back_to_the_library_cache() {
+        let grid = TempDir::new().unwrap();
+        let input = slot_input(
+            Some(grid.path().to_path_buf()),
+            "http://127.0.0.1:1",
+            steam_entry(440, "Team Fortress 2"),
+        );
+        let art = load_slot_art(&input, AssetKind::Hero).await;
+        assert!(matches!(art, SlotArt::Default(_)), "{art:?}");
+    }
+
+    #[tokio::test]
+    async fn slot_art_without_a_grid_folder_still_shows_default_art() {
+        let input = slot_input(
+            None,
+            "http://127.0.0.1:1",
+            steam_entry(440, "Team Fortress 2"),
+        );
+        let art = load_slot_art(&input, AssetKind::Portrait).await;
+        assert!(matches!(art, SlotArt::Default(_)), "{art:?}");
+    }
+
+    #[tokio::test]
+    async fn slot_art_falls_back_to_the_cdn() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/570/header.jpg"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(png_bytes(4, 4)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let input = slot_input(None, &server.uri(), steam_entry(570, "Dota 2"));
+        let art = load_slot_art(&input, AssetKind::Wide).await;
+        assert!(matches!(art, SlotArt::Default(_)), "{art:?}");
+    }
+
+    #[tokio::test]
+    async fn slot_art_is_empty_when_the_cdn_has_no_file() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/570/header.jpg"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let input = slot_input(None, &server.uri(), steam_entry(570, "Dota 2"));
+        let art = load_slot_art(&input, AssetKind::Wide).await;
+        assert!(matches!(art, SlotArt::Empty), "{art:?}");
+    }
+
+    #[tokio::test]
+    async fn slot_art_is_empty_for_a_shortcut_without_custom_art() {
+        let mut entry = steam_entry(3_000_000_000, "My Game");
+        entry.source = EntrySource::NonSteam;
+        let input = slot_input(None, "http://127.0.0.1:1", entry);
+        let art = load_slot_art(&input, AssetKind::Hero).await;
+        assert!(matches!(art, SlotArt::Empty), "{art:?}");
     }
 }
