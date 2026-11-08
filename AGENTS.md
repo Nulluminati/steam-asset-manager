@@ -37,7 +37,10 @@ The approved UI layout is `docs/mockup-main-screen.png`.
   var, then the `KeyStore`. `Secrets::system()` uses the OS keyring
   (service `steam-asset-manager`); tests pass a fake store and env lookup.
   `set_key` with an empty key deletes the stored key.
-- `src/sgdb.rs`: SteamGridDB client.
+- `src/sgdb.rs`: SteamGridDB client. `SgdbClient::candidates(entry, kind)`
+  lists thumbnail and full URLs (a non-Steam entry uses the first name
+  search match; HTTP 404 or no match gives an empty list).
+  `download(candidate, kind)` fetches without the key and runs `prepare`.
 - `src/openai.rs`: OpenAI image client.
 - `tests/fixtures/steam/`: a fake Steam root for tests. Account ID
   `39734273` is the most recent user and owns the `shortcuts.vdf` fixture.
@@ -47,7 +50,7 @@ The approved UI layout is `docs/mockup-main-screen.png`.
   manifests. Tests write a `libraryfolders.vdf` that points at them, because
   that file holds absolute paths.
 
-Not written yet: `app.rs`, `ui/`, `sgdb.rs`, `openai.rs`. Update this map when a card adds or moves a module.
+Not written yet: `app.rs`, `ui/`, `openai.rs`. Update this map when a card adds or moves a module.
 
 ## Commands
 
