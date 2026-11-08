@@ -28,9 +28,12 @@ The approved UI layout is `docs/mockup-main-screen.png`.
   replace every outside dependency. `State::boot` returns the start-up
   `Task`; `load_library` reads the config, the Steam root, the account,
   installed games, shortcuts and owned games, and reports a failure in the
-  status line. Each panel action returns a `Task` and sets the busy flag.
-  `Message::ApplyPressed` writes through `grid::write_asset`. `view` is a
-  placeholder until card 7.
+  status line. Each panel action returns a `Task` and sets the busy flag;
+  a second press does nothing while a call runs. `Message::CandidatesArrived`
+  carries the appid and `AssetKind` the images were made for: a reply that
+  no longer matches the selection or target is dropped, and
+  `Message::ApplyPressed` writes with that stored pair, never with the slot
+  the user looks at now. `view` is a placeholder until card 7.
 - `src/ui/`: `library.rs`, `detail.rs`, `panel.rs`, `settings.rs`.
 - `src/assets.rs`: `AssetKind`.
 - `src/steam/`: `paths.rs`, `users.rs`, `library.rs`, `owned.rs`,

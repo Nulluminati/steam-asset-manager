@@ -118,8 +118,14 @@ pub enum Message {
     PromptChanged(String),
     /// The primary action button was pressed.
     ActionPressed,
-    /// A request for candidates finished.
-    CandidatesArrived(Result<Vec<DynamicImage>, String>),
+    /// A request for candidates finished. The appid and the kind say which
+    /// slot the images were made for, so a late reply cannot land in the
+    /// wrong slot.
+    CandidatesArrived {
+        appid: u32,
+        kind: AssetKind,
+        result: Result<Vec<DynamicImage>, String>,
+    },
     /// The user applied the candidate at this index.
     ApplyPressed(usize),
 }
@@ -136,6 +142,8 @@ pub struct State {
     tab: PanelTab,
     prompt: String,
     candidates: Vec<DynamicImage>,
+    /// The entry and the slot the candidates were made for.
+    candidate_context: Option<(u32, AssetKind)>,
     busy: bool,
     status: Option<Status>,
 }
@@ -154,6 +162,7 @@ impl State {
             tab: PanelTab::SteamGridDb,
             prompt: String::new(),
             candidates: Vec::new(),
+            candidate_context: None,
             busy: false,
             status: None,
         }
@@ -161,7 +170,7 @@ impl State {
 
     /// The state at start-up, with the task that loads the library.
     pub fn boot() -> (State, Task<Message>) {
-        let state = State::new(Services::default());
+        let mut state = State::new(Services::default());
         let task = state.start();
         (state, task)
     }
@@ -229,7 +238,8 @@ impl State {
     }
 
     /// The task that loads the config and the library at start-up.
-    fn start(&self) -> Task<Message> {
+    fn start(&mut self) -> Task<Message> {
+        self.busy = true;
         let input = StartupInput {
             env: Arc::clone(&self.services.env),
             config_path: self.services.config_path.clone(),
@@ -247,18 +257,25 @@ impl State {
         self.account_id = loaded.account_id;
         self.entries = loaded.entries;
         self.status = loaded.status;
+        self.busy = false;
         if self.selected_entry().is_none() {
             self.selected = None;
-            self.candidates.clear();
+            self.drop_candidates();
         }
     }
 
     fn select(&mut self, appid: u32) {
         if self.entries.iter().any(|entry| entry.appid == appid) {
             self.selected = Some(appid);
-            self.candidates.clear();
+            self.drop_candidates();
             self.status = None;
         }
+    }
+
+    /// Forgets the candidates and what they were made for.
+    fn drop_candidates(&mut self) {
+        self.candidates.clear();
+        self.candidate_context = None;
     }
 
     fn fail(&mut self, text: impl Into<String>) {
@@ -268,19 +285,28 @@ impl State {
     /// Marks a request as running and drops the old candidates.
     fn begin_request(&mut self) {
         self.busy = true;
-        self.candidates.clear();
+        self.drop_candidates();
         self.status = None;
     }
 
-    fn apply_candidates(&mut self, result: Result<Vec<DynamicImage>, String>) {
+    fn apply_candidates(
+        &mut self,
+        appid: u32,
+        kind: AssetKind,
+        result: Result<Vec<DynamicImage>, String>,
+    ) {
         self.busy = false;
+        // The user moved on to another game or slot while the request ran.
+        if self.selected_appid() != Some(appid) || self.target != kind {
+            return;
+        }
         match result {
             Err(message) => {
-                self.candidates.clear();
+                self.drop_candidates();
                 self.fail(message);
             }
             Ok(images) if images.is_empty() => {
-                self.candidates.clear();
+                self.drop_candidates();
                 self.status = Some(Status::Info(
                     "No candidates came back. Try again or change the request.".to_string(),
                 ));
@@ -288,6 +314,7 @@ impl State {
             Ok(images) => {
                 let count = images.len();
                 self.candidates = images;
+                self.candidate_context = Some((appid, kind));
                 self.status = Some(Status::Info(format!(
                     "Candidates: {count}. Apply one to save it."
                 )));
@@ -300,14 +327,16 @@ impl State {
             self.fail("Pick a candidate before you apply it.");
             return;
         };
-        let Some(entry) = self.selected_entry().cloned() else {
-            self.fail("Select a game before you save art.");
+        let Some((appid, kind)) = self.candidate_context else {
+            self.fail("Pick a candidate before you apply it.");
             return;
         };
         let Some(grid) = self.grid_dir() else {
             return;
         };
-        match grid::write_asset(&grid, entry.appid, self.target, &image) {
+        // Write with the slot the image was made for, not the slot the user
+        // happens to look at now.
+        match grid::write_asset(&grid, appid, kind, &image) {
             Ok(path) => {
                 let name = path
                     .file_name()
@@ -345,6 +374,7 @@ impl State {
             return Task::none();
         };
         let kind = self.target;
+        let appid = entry.appid;
         match self.tab {
             PanelTab::SteamGridDb => {
                 let Some(key) = self.services.secrets.get_key(Service::SteamGridDb) else {
@@ -354,7 +384,11 @@ impl State {
                 self.begin_request();
                 Task::perform(
                     request_sgdb(key, self.services.sgdb_base.clone(), entry, kind),
-                    Message::CandidatesArrived,
+                    move |result| Message::CandidatesArrived {
+                        appid,
+                        kind,
+                        result,
+                    },
                 )
             }
             PanelTab::Generate => {
@@ -371,7 +405,11 @@ impl State {
                         self.prompt.clone(),
                         kind,
                     ),
-                    Message::CandidatesArrived,
+                    move |result| Message::CandidatesArrived {
+                        appid,
+                        kind,
+                        result,
+                    },
                 )
             }
             PanelTab::Modify => {
@@ -384,7 +422,13 @@ impl State {
                     None => return Task::none(),
                 };
                 self.begin_request();
-                Task::perform(request_modify(request), Message::CandidatesArrived)
+                Task::perform(request_modify(request), move |result| {
+                    Message::CandidatesArrived {
+                        appid,
+                        kind,
+                        result,
+                    }
+                })
             }
         }
     }
@@ -421,13 +465,21 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::FilterChanged(text) => state.filter = text,
         Message::EntrySelected(appid) => state.select(appid),
         Message::SlotAction(kind, tab) => {
+            // The candidate grid belongs to the old slot.
+            if kind != state.target {
+                state.drop_candidates();
+            }
             state.target = kind;
             state.tab = tab;
         }
         Message::TabSelected(tab) => state.tab = tab,
         Message::PromptChanged(text) => state.prompt = text,
         Message::ActionPressed => return state.start_action(),
-        Message::CandidatesArrived(result) => state.apply_candidates(result),
+        Message::CandidatesArrived {
+            appid,
+            kind,
+            result,
+        } => state.apply_candidates(appid, kind, result),
         Message::ApplyPressed(index) => state.apply_candidate(index),
     }
     Task::none()
@@ -481,7 +533,7 @@ pub async fn load_library(input: StartupInput) -> LoadedLibrary {
     if let (Some(key), Some(user)) = (input.steam_api_key, user) {
         match owned::fetch_owned(&key, user.steam_id64, &input.steam_api_base).await {
             Ok(owned) => entries = owned::merge(entries, owned),
-            Err(err) => errors.push(err.to_string()),
+            Err(err) => errors.push(format!("Cannot list owned games: {err}")),
         }
     }
 
@@ -513,12 +565,10 @@ async fn request_sgdb(
         .map_err(|err| err.to_string())?;
     let mut images = Vec::new();
     for candidate in found.iter().take(usize::from(CANDIDATE_COUNT)) {
-        images.push(
-            client
-                .download(candidate, kind)
-                .await
-                .map_err(|err| err.to_string())?,
-        );
+        // One missing or broken image must not hide the other candidates.
+        if let Ok(image) = client.download(candidate, kind).await {
+            images.push(image);
+        }
     }
     Ok(images)
 }
@@ -766,6 +816,15 @@ mod tests {
         DynamicImage::ImageRgba8(RgbaImage::from_pixel(width, height, Rgba([9, 9, 9, 255])))
     }
 
+    /// The message a request task sends back with images.
+    fn candidates(appid: u32, kind: AssetKind, images: Vec<DynamicImage>) -> Message {
+        Message::CandidatesArrived {
+            appid,
+            kind,
+            result: Ok(images),
+        }
+    }
+
     /// A state with a loaded library, as the start-up task would set it.
     fn state_with(
         services: Services,
@@ -891,7 +950,7 @@ mod tests {
         );
         send(
             &mut state,
-            Message::CandidatesArrived(Ok(vec![solid(1920, 620)])),
+            candidates(440, AssetKind::Hero, vec![solid(1920, 620)]),
         );
         send(&mut state, Message::ApplyPressed(0));
 
@@ -910,22 +969,115 @@ mod tests {
     }
 
     #[test]
-    fn apply_without_a_selection_shows_an_error() {
+    fn apply_uses_the_kind_the_candidates_were_made_for() {
         let temp = TempDir::new().unwrap();
         let mut state = state_with(
             services(&[]),
             Some(temp.path().to_path_buf()),
             vec![steam_entry(440, "Team Fortress 2")],
         );
+        send(&mut state, Message::EntrySelected(440));
         send(
             &mut state,
-            Message::CandidatesArrived(Ok(vec![solid(1920, 620)])),
+            Message::SlotAction(AssetKind::Hero, PanelTab::SteamGridDb),
         );
+        send(
+            &mut state,
+            candidates(440, AssetKind::Hero, vec![solid(1920, 620)]),
+        );
+        // A target change must not move the Hero image into the portrait slot.
+        state.target = AssetKind::Portrait;
         send(&mut state, Message::ApplyPressed(0));
 
+        let grid = temp
+            .path()
+            .join("userdata")
+            .join(ACCOUNT_ID.to_string())
+            .join("config/grid");
+        assert!(grid.join("440_hero.png").is_file());
+        assert!(!grid.join("440p.png").exists());
+    }
+
+    #[test]
+    fn a_target_change_clears_the_candidates() {
+        let temp = TempDir::new().unwrap();
+        let mut state = state_with(
+            services(&[]),
+            Some(temp.path().to_path_buf()),
+            vec![steam_entry(440, "Team Fortress 2")],
+        );
+        send(&mut state, Message::EntrySelected(440));
+        send(
+            &mut state,
+            Message::SlotAction(AssetKind::Hero, PanelTab::SteamGridDb),
+        );
+        send(
+            &mut state,
+            candidates(440, AssetKind::Hero, vec![solid(1920, 620)]),
+        );
+        send(
+            &mut state,
+            Message::SlotAction(AssetKind::Portrait, PanelTab::SteamGridDb),
+        );
+        assert!(state.candidates().is_empty());
+
+        send(&mut state, Message::ApplyPressed(0));
+        let grid = temp
+            .path()
+            .join("userdata")
+            .join(ACCOUNT_ID.to_string())
+            .join("config/grid");
+        assert!(!grid.join("440p.png").exists());
         let status = state.status().expect("a status line");
         assert!(status.is_error(), "{}", status.text());
-        assert!(status.text().contains("Select a game"), "{}", status.text());
+    }
+
+    #[test]
+    fn reply_for_another_game_is_dropped() {
+        let mut state = state_with(
+            services(&[(Service::SteamGridDb, "sgdb-key")]),
+            Some(PathBuf::from("/nonexistent-steam")),
+            vec![
+                steam_entry(440, "Team Fortress 2"),
+                steam_entry(570, "Dota 2"),
+            ],
+        );
+        send(&mut state, Message::EntrySelected(440));
+        send(
+            &mut state,
+            Message::SlotAction(AssetKind::Hero, PanelTab::SteamGridDb),
+        );
+        send(&mut state, Message::ActionPressed);
+        assert!(state.busy());
+
+        // The user moves on to another game while the request runs.
+        send(&mut state, Message::EntrySelected(570));
+        send(
+            &mut state,
+            candidates(440, AssetKind::Hero, vec![solid(1920, 620)]),
+        );
+
+        assert!(!state.busy());
+        assert!(state.candidates().is_empty());
+    }
+
+    #[test]
+    fn reply_for_another_kind_is_dropped() {
+        let mut state = state_with(
+            services(&[]),
+            None,
+            vec![steam_entry(440, "Team Fortress 2")],
+        );
+        send(&mut state, Message::EntrySelected(440));
+        send(
+            &mut state,
+            Message::SlotAction(AssetKind::Portrait, PanelTab::SteamGridDb),
+        );
+        send(
+            &mut state,
+            candidates(440, AssetKind::Hero, vec![solid(1920, 620)]),
+        );
+        assert!(state.candidates().is_empty());
     }
 
     #[test]
@@ -1005,9 +1157,18 @@ mod tests {
             None,
             vec![steam_entry(440, "Team Fortress 2")],
         );
+        send(&mut state, Message::EntrySelected(440));
         send(
             &mut state,
-            Message::CandidatesArrived(Err("OpenAI returned HTTP 400: no dice".to_string())),
+            Message::SlotAction(AssetKind::Hero, PanelTab::Generate),
+        );
+        send(
+            &mut state,
+            Message::CandidatesArrived {
+                appid: 440,
+                kind: AssetKind::Hero,
+                result: Err("OpenAI returned HTTP 400: no dice".to_string()),
+            },
         );
         assert!(state.candidates().is_empty());
         let status = state.status().expect("a status line");
@@ -1022,7 +1183,12 @@ mod tests {
             None,
             vec![steam_entry(440, "Team Fortress 2")],
         );
-        send(&mut state, Message::CandidatesArrived(Ok(Vec::new())));
+        send(&mut state, Message::EntrySelected(440));
+        send(
+            &mut state,
+            Message::SlotAction(AssetKind::Hero, PanelTab::SteamGridDb),
+        );
+        send(&mut state, candidates(440, AssetKind::Hero, Vec::new()));
         assert!(state.candidates().is_empty());
         let status = state.status().expect("a status line");
         assert!(!status.is_error(), "{}", status.text());
@@ -1047,7 +1213,7 @@ mod tests {
 
         send(
             &mut state,
-            Message::CandidatesArrived(Ok(vec![solid(920, 430)])),
+            candidates(440, AssetKind::Wide, vec![solid(920, 430)]),
         );
         assert!(!state.busy());
         assert_eq!(state.candidates().len(), 1);
@@ -1072,6 +1238,26 @@ mod tests {
         let status = state.status().expect("a status line");
         assert!(status.is_error(), "{}", status.text());
         assert!(status.text().contains("Select a game"), "{}", status.text());
+    }
+
+    #[test]
+    fn startup_sets_busy_until_the_library_loads() {
+        let mut state = State::new(services(&[]));
+        let task = state.start();
+        assert!(state.busy());
+        drop(task);
+
+        send(
+            &mut state,
+            Message::Loaded(Box::new(LoadedLibrary {
+                config: Config::default(),
+                steam_root: Some(PathBuf::from("/steam")),
+                account_id: Some(ACCOUNT_ID),
+                entries: vec![steam_entry(440, "Team Fortress 2")],
+                status: None,
+            })),
+        );
+        assert!(!state.busy());
     }
 
     #[tokio::test]
@@ -1119,6 +1305,11 @@ mod tests {
 
         let status = loaded.status.as_ref().expect("a status line");
         assert!(status.is_error(), "{}", status.text());
+        assert!(
+            status.text().starts_with("Cannot list owned games:"),
+            "{}",
+            status.text()
+        );
         assert!(
             status.text().contains("Steam Web API key"),
             "{}",
@@ -1232,5 +1423,67 @@ mod tests {
         );
         assert_eq!(state.selected_appid(), None);
         assert!(state.status().is_none());
+    }
+
+    /// The bytes of a PNG at one size.
+    fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+        use image::ImageFormat;
+        use std::io::Cursor;
+
+        let mut bytes = Cursor::new(Vec::new());
+        solid(width, height)
+            .write_to(&mut bytes, ImageFormat::Png)
+            .unwrap();
+        bytes.into_inner()
+    }
+
+    #[tokio::test]
+    async fn request_sgdb_skips_a_failed_download() {
+        let server = MockServer::start().await;
+        let list = serde_json::json!({
+            "success": true,
+            "data": [
+                {
+                    "id": 11,
+                    "url": format!("{}/full/11.png", server.uri()),
+                    "thumb": format!("{}/thumb/11.png", server.uri())
+                },
+                {
+                    "id": 12,
+                    "url": format!("{}/full/12.png", server.uri()),
+                    "thumb": format!("{}/thumb/12.png", server.uri())
+                }
+            ]
+        });
+        Mock::given(method("GET"))
+            .and(path("/grids/steam/440"))
+            .and(query_param("dimensions", "600x900"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(list))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/full/11.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(png_bytes(600, 900)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/full/12.png"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let images = request_sgdb(
+            "sgdb-key".to_string(),
+            server.uri(),
+            steam_entry(440, "Team Fortress 2"),
+            AssetKind::Portrait,
+        )
+        .await
+        .unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!((images[0].width(), images[0].height()), (600, 900));
     }
 }
