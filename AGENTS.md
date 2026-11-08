@@ -31,7 +31,12 @@ The approved UI layout is `docs/mockup-main-screen.png`.
   and the shared text VDF helpers (keys match without regard to case).
 - `src/imaging.rs`: crop and resize. `prepare(image, kind)` gives the
   exact Steam size, or trims a logo's transparent borders.
-- `src/config.rs`, `src/secrets.rs`: settings and API keys.
+- `src/config.rs`: `Config` (`steam_root`, `openai_model`) as TOML at
+  `config::default_path()`. A missing file or field gives the default.
+- `src/secrets.rs`: API keys. `Secrets::get_key(Service)` reads the env
+  var, then the `KeyStore`. `Secrets::system()` uses the OS keyring
+  (service `steam-asset-manager`); tests pass a fake store and env lookup.
+  `set_key` with an empty key deletes the stored key.
 - `src/sgdb.rs`: SteamGridDB client.
 - `src/openai.rs`: OpenAI image client.
 - `tests/fixtures/steam/`: a fake Steam root for tests. Account ID
@@ -42,8 +47,7 @@ The approved UI layout is `docs/mockup-main-screen.png`.
   manifests. Tests write a `libraryfolders.vdf` that points at them, because
   that file holds absolute paths.
 
-Not written yet: `app.rs`, `ui/`, `config.rs`, `secrets.rs`, `sgdb.rs`,
-`openai.rs`. Update this map when a card adds or moves a module.
+Not written yet: `app.rs`, `ui/`, `sgdb.rs`, `openai.rs`. Update this map when a card adds or moves a module.
 
 ## Commands
 
