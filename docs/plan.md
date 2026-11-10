@@ -4,7 +4,7 @@
 `steam-asset-manager` is a desktop app in Rust with the iced GUI library. It lets a Steam user set the custom library art (portrait capsule, wide capsule, hero, logo) for Steam games and non-Steam shortcuts. Art comes from SteamGridDB, from the OpenAI image API, or from an OpenAI edit of the current art.
 
 ## Decisions
-- **Platforms: Linux, macOS and Windows from the start.** Put every OS-specific path in one module (`src/steam/paths.rs`). CI runs on all three. Manual testing runs on another PC with Steam (Windows or macOS), because the Fedora dev machine has no Steam.
+- **Platforms: Linux, macOS and Windows from the start.** Put every OS-specific path in one module (`src/steam/paths.rs`). CI runs on Linux and Windows. Manual testing runs on another PC with Steam (Windows or macOS), because the Fedora dev machine has no Steam.
 - **Milestone 1 is the full scope.** Library browse, SteamGridDB pull, OpenAI generate and OpenAI modify all ship in milestone 1.
 - **Entries: Steam games and non-Steam shortcuts.** Non-Steam shortcuts come from the binary `shortcuts.vdf`.
 - **Steam games: owned and installed.** Use the Steam Web API `GetOwnedGames` with a Steam Web API key, merged with the installed app manifests. Without a Steam key, the app shows installed games only.

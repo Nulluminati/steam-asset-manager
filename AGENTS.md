@@ -95,7 +95,7 @@ cargo build --release
 ```
 
 All four must pass with clean output. CI (`.github/workflows/ci.yml`) runs
-them on Linux, macOS and Windows.
+them on Linux and Windows.
 
 ## Rules
 
