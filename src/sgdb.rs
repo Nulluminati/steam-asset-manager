@@ -9,6 +9,10 @@ use crate::steam::library::{EntrySource, LibraryEntry};
 
 pub const SGDB_BASE: &str = "https://www.steamgriddb.com/api/v2";
 
+/// The number of images one API page holds. The API docs do not state it;
+/// a page with fewer images is taken as the last page.
+pub const SGDB_PAGE_SIZE: usize = 50;
+
 #[derive(Debug, thiserror::Error)]
 pub enum SgdbError {
     #[error("SteamGridDB rejected the API key (HTTP {0})")]
@@ -47,13 +51,23 @@ impl SgdbClient {
         }
     }
 
-    /// The images for `kind` of `entry`. A Steam game uses its app ID.
-    /// A non-Steam shortcut uses the first game a name search finds.
-    /// No match gives an empty list.
+    /// The first API page of images for `kind` of `entry`.
     pub async fn candidates(
         &self,
         entry: &LibraryEntry,
         kind: AssetKind,
+    ) -> Result<Vec<Candidate>, SgdbError> {
+        self.candidates_page(entry, kind, 0).await
+    }
+
+    /// One API page (from 0) of images for `kind` of `entry`. A Steam game
+    /// uses its app ID. A non-Steam shortcut uses the first game a name
+    /// search finds. No match gives an empty list.
+    pub async fn candidates_page(
+        &self,
+        entry: &LibraryEntry,
+        kind: AssetKind,
+        page: u32,
     ) -> Result<Vec<Candidate>, SgdbError> {
         // SteamGridDB has one ID space for Steam app IDs and one for its own game IDs.
         let (space, id) = match entry.source {
@@ -75,6 +89,7 @@ impl SgdbClient {
         if let Some(dimensions) = dimensions {
             request = request.query(&[("dimensions", dimensions)]);
         }
+        request = request.query(&[("page", page)]);
         let images: Option<Vec<SgdbImage>> = self.get_data(request).await?;
         Ok(images
             .unwrap_or_default()
@@ -94,14 +109,24 @@ impl SgdbClient {
         candidate: &Candidate,
         kind: AssetKind,
     ) -> Result<DynamicImage, SgdbError> {
-        // The full URL points at the SteamGridDB CDN, which needs no key.
-        let response = self.http.get(&candidate.full_url).send().await?;
+        let bytes = self.fetch_cdn(&candidate.full_url).await?;
+        let image = image::load_from_memory(&bytes)?;
+        Ok(imaging::prepare(&image, kind))
+    }
+
+    /// The encoded bytes of the thumbnail of `candidate`.
+    pub async fn thumbnail(&self, candidate: &Candidate) -> Result<Vec<u8>, SgdbError> {
+        self.fetch_cdn(&candidate.thumb_url).await
+    }
+
+    /// The bytes at `url`.
+    async fn fetch_cdn(&self, url: &str) -> Result<Vec<u8>, SgdbError> {
+        // Image URLs point at the SteamGridDB CDN, which needs no key.
+        let response = self.http.get(url).send().await?;
         if !response.status().is_success() {
             return Err(SgdbError::Status(response.status().as_u16()));
         }
-        let bytes = response.bytes().await?;
-        let image = image::load_from_memory(&bytes)?;
-        Ok(imaging::prepare(&image, kind))
+        Ok(response.bytes().await?.to_vec())
     }
 
     /// The ID of the first game a name search finds.
@@ -404,6 +429,67 @@ mod tests {
         let client = SgdbClient::new(KEY, &server.uri());
         let result = client.candidates(&steam_entry(440), AssetKind::Hero).await;
         assert!(matches!(result, Err(SgdbError::Status(500))), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn candidates_page_asks_for_that_api_page() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/heroes/steam/440"))
+            .and(query_param("page", "2"))
+            .and(header("Authorization", "Bearer test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(images_body(&server, &[21])))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = SgdbClient::new(KEY, &server.uri());
+        let found = client
+            .candidates_page(&steam_entry(440), AssetKind::Hero, 2)
+            .await
+            .unwrap();
+        assert_eq!(found, vec![candidate(&server, 21)]);
+    }
+
+    #[tokio::test]
+    async fn candidates_asks_for_the_first_api_page() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/logos/steam/440"))
+            .and(query_param("page", "0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(images_body(&server, &[22])))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = SgdbClient::new(KEY, &server.uri());
+        let found = client
+            .candidates(&steam_entry(440), AssetKind::Logo)
+            .await
+            .unwrap();
+        assert_eq!(found, vec![candidate(&server, 22)]);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_gives_the_thumb_bytes_without_the_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/thumb/23.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"thumb".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = SgdbClient::new(KEY, &server.uri());
+        let bytes = client.thumbnail(&candidate(&server, 23)).await.unwrap();
+        assert_eq!(bytes, b"thumb");
+        let requests = server.received_requests().await.unwrap();
+        assert!(requests[0].headers.get("authorization").is_none());
+    }
+
+    #[tokio::test]
+    async fn thumbnail_of_a_missing_image_is_a_status_error() {
+        let server = MockServer::start().await;
+        let client = SgdbClient::new(KEY, &server.uri());
+        let result = client.thumbnail(&candidate(&server, 24)).await;
+        assert!(matches!(result, Err(SgdbError::Status(404))), "{result:?}");
     }
 
     #[tokio::test]

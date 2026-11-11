@@ -7,7 +7,7 @@ use iced::widget::image::Handle;
 use iced::widget::{button, column, image, pick_list, row, space, text, text_editor};
 use iced::{ContentFit, Element, Length};
 
-use crate::app::{Message, PanelTab, State};
+use crate::app::{GRID_CELLS, Message, PanelTab, SgdbResults, State, Thumb};
 use crate::assets::AssetKind;
 
 use super::detail::{SlotArt, slot_caption};
@@ -46,6 +46,19 @@ pub fn modify_source(kind: AssetKind, art: &SlotArt) -> Option<(&Handle, String)
         SlotArt::Loading | SlotArt::Empty => return None,
     };
     Some((handle, format!("Modifying: {} ({origin})", kind.label())))
+}
+
+/// The text between the SteamGridDB page buttons, for example
+/// `5 to 8 of 31`. `first` counts from 0; `more` adds a `+` to the total
+/// when the API can hold more images.
+pub fn page_counter(first: usize, shown: usize, total: usize, more: bool) -> String {
+    let plus = if more { "+" } else { "" };
+    let from = first + 1;
+    if shown <= 1 {
+        format!("{from} of {total}{plus}")
+    } else {
+        format!("{from} to {} of {total}{plus}", first + shown)
+    }
 }
 
 /// The text of the primary action button.
@@ -134,7 +147,10 @@ pub fn view(state: &State) -> Element<'_, Message> {
         .on_press_maybe(ready.then_some(Message::ActionPressed)),
     );
 
-    content = content.push(candidates(state));
+    content = content.push(match state.sgdb_results() {
+        Some(results) => sgdb_page(results, state.busy()),
+        None => candidates(state),
+    });
     content = content.push(space::vertical());
     if let Some(status) = state.status() {
         let line = text(status.text()).size(13);
@@ -149,28 +165,93 @@ pub fn view(state: &State) -> Element<'_, Message> {
 
 /// The candidates two per row, each with an Apply button.
 fn candidates(state: &State) -> Element<'_, Message> {
-    let cards: Vec<Element<'_, Message>> = state
+    let cards = state
         .candidate_handles()
         .iter()
         .enumerate()
         .map(|(index, handle)| {
-            column![
+            card(
                 image(handle.clone())
                     .width(Length::Fill)
                     .height(100)
-                    .content_fit(ContentFit::Contain),
-                button(text("Apply").center().width(Length::Fill))
-                    .width(Length::Fill)
-                    .style(button::primary)
-                    .on_press(Message::ApplyPressed(index)),
-            ]
-            .spacing(6)
-            .width(Length::Fill)
-            .into()
+                    .content_fit(ContentFit::Contain)
+                    .into(),
+                Some(Message::ApplyPressed(index)),
+            )
         })
         .collect();
+    grid(cards)
+}
+
+/// One SteamGridDB page: the thumbnails, then Previous, the counter and Next.
+fn sgdb_page(results: &SgdbResults, busy: bool) -> Element<'_, Message> {
+    let first = results.first_index();
+    let cards = results
+        .page_candidates()
+        .iter()
+        .enumerate()
+        .map(|(offset, candidate)| {
+            let picture: Element<'_, Message> = match results.thumb(candidate.id) {
+                Thumb::Ready(handle) => image(handle.clone())
+                    .width(Length::Fill)
+                    .height(100)
+                    .content_fit(ContentFit::Contain)
+                    .into(),
+                Thumb::Loading => placeholder("Loading..."),
+                Thumb::Failed => placeholder("No preview"),
+            };
+            card(
+                picture,
+                (!busy).then_some(Message::ApplyPressed(first + offset)),
+            )
+        })
+        .collect();
+    let pager = row![
+        button(text("Previous").center())
+            .style(button::secondary)
+            .on_press_maybe((!busy && results.has_previous()).then_some(Message::SgdbPrevious)),
+        text(results.counter())
+            .size(13)
+            .center()
+            .width(Length::Fill),
+        button(text("Next").center())
+            .style(button::secondary)
+            .on_press_maybe((!busy && results.has_next()).then_some(Message::SgdbNext)),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+    column![grid(cards), pager].spacing(12).into()
+}
+
+/// A grid cell text in place of an image.
+fn placeholder(label: &str) -> Element<'_, Message> {
+    text(label)
+        .size(13)
+        .style(text::secondary)
+        .center()
+        .width(Length::Fill)
+        .height(100)
+        .into()
+}
+
+/// One grid cell: the picture and an Apply button.
+fn card<'a>(picture: Element<'a, Message>, apply: Option<Message>) -> Element<'a, Message> {
+    column![
+        picture,
+        button(text("Apply").center().width(Length::Fill))
+            .width(Length::Fill)
+            .style(button::primary)
+            .on_press_maybe(apply),
+    ]
+    .spacing(6)
+    .width(Length::Fill)
+    .into()
+}
+
+/// The cards two per row, up to [`GRID_CELLS`].
+fn grid(cards: Vec<Element<'_, Message>>) -> Element<'_, Message> {
     let mut grid = column![].spacing(12);
-    let mut cards = cards.into_iter();
+    let mut cards = cards.into_iter().take(GRID_CELLS);
     while let Some(first) = cards.next() {
         let second: Element<'_, Message> = match cards.next() {
             Some(card) => card,
@@ -232,6 +313,13 @@ mod tests {
         );
         assert_eq!(action_label(PanelTab::Generate, false), "Generate");
         assert_eq!(action_label(PanelTab::Modify, false), "Modify");
+    }
+
+    #[test]
+    fn page_counter_names_the_shown_range() {
+        assert_eq!(page_counter(4, 4, 31, false), "5 to 8 of 31");
+        assert_eq!(page_counter(0, 4, 50, true), "1 to 4 of 50+");
+        assert_eq!(page_counter(8, 1, 9, false), "9 of 9");
     }
 
     #[test]

@@ -51,7 +51,13 @@ The approved UI layout is `docs/mockup-main-screen.png`.
   Generate and Modify use the `ImageBackend` of `Config::image_source`:
   the OpenAI API (needs the key) or Codex (`Services::codex`,
   `Services::codex_home`), and ask for `Config::images_per_request`
-  images. SteamGridDB shows up to `MAX_IMAGES_PER_REQUEST`. `view` calls
+  images. A SteamGridDB search keeps every result in `SgdbResults` (bound
+  to the appid and `AssetKind`), shows `GRID_CELLS` (4) per page with
+  `Message::SgdbPrevious` and `Message::SgdbNext`, and loads the
+  thumbnails of the current page only (`Message::SgdbThumbsLoaded`).
+  `Next` past the loaded list asks for the next API page after a full
+  one (`Message::SgdbListed`). Apply on SteamGridDB downloads the full
+  image (`Message::SgdbDownloaded`) and then writes it. `view` calls
   `ui::view`.
 - `src/ui/`: the iced views. `mod.rs` holds `theme` (dark, steel blue
   accent), `window_icon` (decodes `assets/icon.png`) and `view` (library, detail and panel in a row; the settings
@@ -59,7 +65,8 @@ The approved UI layout is `docs/mockup-main-screen.png`.
   `tag_text` and `install_note`), `detail.rs` (`SlotArt`, `slot_caption`,
   the four slot frames; a click on a frame sets the target), `panel.rs`
   (tabs, `TargetOption` dropdown, prompt `text_editor`, action button,
-  2x2 candidates; on Modify, the source thumbnail from `modify_source`;
+  2x2 candidates; on SteamGridDB, the page thumbnails and the pager with
+  `page_counter`; on Modify, the source thumbnail from `modify_source`;
   `modify_enabled`, `action_label`), `settings.rs`
   (`SettingsForm`: key inputs prefilled from `Secrets::get_key`,
   `changed_keys`, `to_config`, the image source radio buttons, the
@@ -84,7 +91,10 @@ The approved UI layout is `docs/mockup-main-screen.png`.
 - `src/sgdb.rs`: SteamGridDB client. `SgdbClient::candidates(entry, kind)`
   lists thumbnail and full URLs (a non-Steam entry uses the first name
   search match; HTTP 404 or no match gives an empty list).
-  `download(candidate, kind)` fetches without the key and runs `prepare`.
+  `candidates_page(entry, kind, page)` asks for one API page (`page`
+  query parameter, from 0; `SGDB_PAGE_SIZE` 50 is assumed).
+  `download(candidate, kind)` fetches without the key and runs `prepare`;
+  `thumbnail(candidate)` gives the thumbnail bytes.
 - `src/openai.rs`: OpenAI image client. `OpenAiClient::generate(prompt, kind,
   count)` makes new images; `modify(&DynamicImage, prompt, kind, count)`
   makes edits in a multipart request. Both ask for a custom size per kind

@@ -11,10 +11,10 @@ use image::DynamicImage;
 
 use crate::assets::AssetKind;
 use crate::codex::{CodexClient, CodexRunner, CodexStatus, SystemCodex};
-use crate::config::{self, Config, ImageSource, MAX_IMAGES_PER_REQUEST};
+use crate::config::{self, Config, ImageSource};
 use crate::openai::OpenAiClient;
 use crate::secrets::{Secrets, Service};
-use crate::sgdb::SgdbClient;
+use crate::sgdb::{Candidate, SGDB_PAGE_SIZE, SgdbClient};
 use crate::steam::defaults::{self, DefaultArt};
 use crate::steam::library::{LibraryEntry, sort_entries};
 use crate::steam::paths::{self, PathEnv, SystemEnv};
@@ -41,6 +41,120 @@ impl PanelTab {
             PanelTab::Generate => "Generate",
             PanelTab::Modify => "Modify",
         }
+    }
+}
+
+/// The number of cells of the candidate grid: one SteamGridDB page.
+pub const GRID_CELLS: usize = 4;
+
+/// The thumbnail of one SteamGridDB candidate.
+#[derive(Debug, Clone, Copy)]
+pub enum Thumb<'a> {
+    Loading,
+    Ready(&'a Handle),
+    Failed,
+}
+
+/// The images a SteamGridDB search found, shown one page of
+/// [`GRID_CELLS`] at a time.
+#[derive(Debug, Clone)]
+pub struct SgdbResults {
+    /// The entry and the slot the search was made for.
+    appid: u32,
+    kind: AssetKind,
+    found: Vec<Candidate>,
+    /// The page the grid shows, from 0.
+    page: usize,
+    /// The thumbnails by candidate ID; `None` when the download failed.
+    thumbs: HashMap<u64, Option<Handle>>,
+    /// The API page the last list request asked for.
+    api_page: u32,
+    /// The API can hold more images than `found`.
+    more: bool,
+}
+
+impl SgdbResults {
+    fn new(appid: u32, kind: AssetKind, found: Vec<Candidate>) -> Self {
+        SgdbResults {
+            appid,
+            kind,
+            more: found.len() >= SGDB_PAGE_SIZE,
+            found,
+            page: 0,
+            thumbs: HashMap::new(),
+            api_page: 0,
+        }
+    }
+
+    /// Every candidate the app has loaded.
+    pub fn candidates(&self) -> &[Candidate] {
+        &self.found
+    }
+
+    /// The index in [`Self::candidates`] of the first cell of the page.
+    pub fn first_index(&self) -> usize {
+        self.page * GRID_CELLS
+    }
+
+    /// The candidates of the page the grid shows.
+    pub fn page_candidates(&self) -> &[Candidate] {
+        let start = self.first_index().min(self.found.len());
+        let end = (start + GRID_CELLS).min(self.found.len());
+        &self.found[start..end]
+    }
+
+    pub fn has_previous(&self) -> bool {
+        self.page > 0
+    }
+
+    pub fn has_next(&self) -> bool {
+        self.first_index() + GRID_CELLS < self.found.len() || self.more
+    }
+
+    /// The text between the page buttons, for example `5 to 8 of 31`.
+    pub fn counter(&self) -> String {
+        crate::ui::panel::page_counter(
+            self.first_index(),
+            self.page_candidates().len(),
+            self.found.len(),
+            self.more,
+        )
+    }
+
+    pub fn thumb(&self, id: u64) -> Thumb<'_> {
+        match self.thumbs.get(&id) {
+            None => Thumb::Loading,
+            Some(Some(handle)) => Thumb::Ready(handle),
+            Some(None) => Thumb::Failed,
+        }
+    }
+
+    /// The candidates of the page that have no thumbnail yet.
+    pub fn thumbs_to_load(&self) -> Vec<Candidate> {
+        self.page_candidates()
+            .iter()
+            .filter(|candidate| !self.thumbs.contains_key(&candidate.id))
+            .cloned()
+            .collect()
+    }
+
+    /// The next page needs images the app has not loaded yet.
+    fn next_needs_fetch(&self) -> bool {
+        self.more && self.first_index() + 2 * GRID_CELLS > self.found.len()
+    }
+
+    /// Adds one more API page. A page without new IDs ends the list, so an
+    /// API that ignores the page number cannot repeat the same images.
+    fn append(&mut self, api_page: u32, found: Vec<Candidate>) {
+        let full = found.len() >= SGDB_PAGE_SIZE;
+        let before = self.found.len();
+        for candidate in found {
+            if !self.found.iter().any(|known| known.id == candidate.id) {
+                self.found.push(candidate);
+            }
+        }
+        self.api_page = api_page;
+        self.more = full && self.found.len() > before;
     }
 }
 
@@ -134,8 +248,31 @@ pub enum Message {
         kind: AssetKind,
         result: Result<Vec<DynamicImage>, String>,
     },
-    /// The user applied the candidate at this index.
+    /// The user applied the candidate at this index. On SteamGridDB the
+    /// index counts across all pages.
     ApplyPressed(usize),
+    /// A SteamGridDB list request for one API page finished.
+    SgdbListed {
+        appid: u32,
+        kind: AssetKind,
+        api_page: u32,
+        result: Result<Vec<Candidate>, String>,
+    },
+    /// Thumbnails of one SteamGridDB page by candidate ID; `None` when the
+    /// download failed.
+    SgdbThumbsLoaded {
+        appid: u32,
+        kind: AssetKind,
+        thumbs: Vec<(u64, Option<Handle>)>,
+    },
+    SgdbPrevious,
+    SgdbNext,
+    /// The full image of the applied SteamGridDB candidate, prepared.
+    SgdbDownloaded {
+        appid: u32,
+        kind: AssetKind,
+        result: Result<DynamicImage, String>,
+    },
     /// The Target dropdown: it sets the target and keeps the tab.
     TargetSelected(AssetKind),
     /// An edit in the multi-line prompt box.
@@ -173,6 +310,9 @@ pub struct State {
     candidate_handles: Vec<Handle>,
     /// The entry and the slot the candidates were made for.
     candidate_context: Option<(u32, AssetKind)>,
+    /// The SteamGridDB search results. Only one of these and `candidates`
+    /// holds images at a time.
+    sgdb: Option<SgdbResults>,
     busy: bool,
     status: Option<Status>,
     /// The current art of each slot of the selected entry.
@@ -199,6 +339,7 @@ impl State {
             candidates: Vec::new(),
             candidate_handles: Vec::new(),
             candidate_context: None,
+            sgdb: None,
             busy: false,
             status: None,
             slot_art: HashMap::new(),
@@ -258,6 +399,10 @@ impl State {
 
     pub fn candidate_handles(&self) -> &[Handle] {
         &self.candidate_handles
+    }
+
+    pub fn sgdb_results(&self) -> Option<&SgdbResults> {
+        self.sgdb.as_ref()
     }
 
     /// The current art of one slot of the selected entry.
@@ -380,6 +525,7 @@ impl State {
         self.candidates.clear();
         self.candidate_handles.clear();
         self.candidate_context = None;
+        self.sgdb = None;
     }
 
     fn set_target(&mut self, kind: AssetKind) {
@@ -525,16 +671,21 @@ impl State {
             self.fail("Pick a candidate before you apply it.");
             return;
         };
+        self.write_candidate(appid, kind, &image);
+    }
+
+    /// Writes `image` to the `kind` slot of `appid` and shows it there.
+    fn write_candidate(&mut self, appid: u32, kind: AssetKind, image: &DynamicImage) {
         let Some(grid) = self.grid_dir() else {
             return;
         };
         // Write with the slot the image was made for, not the slot the user
         // happens to look at now.
-        match grid::write_asset(&grid, appid, kind, &image) {
+        match grid::write_asset(&grid, appid, kind, image) {
             Ok(path) => {
                 if self.selected == Some(appid) {
                     self.slot_art
-                        .insert(kind, SlotArt::Custom(image_handle(&image)));
+                        .insert(kind, SlotArt::Custom(image_handle(image)));
                 }
                 let name = path
                     .file_name()
@@ -580,14 +731,7 @@ impl State {
                     return Task::none();
                 };
                 self.begin_request();
-                Task::perform(
-                    request_sgdb(key, self.services.sgdb_base.clone(), entry, kind),
-                    move |result| Message::CandidatesArrived {
-                        appid,
-                        kind,
-                        result,
-                    },
-                )
+                self.list_task(key, entry, kind, 0)
             }
             PanelTab::Generate => {
                 let Some(backend) = self.image_backend() else {
@@ -629,6 +773,184 @@ impl State {
                     }
                 })
             }
+        }
+    }
+
+    /// The task that lists one API page of SteamGridDB images.
+    fn list_task(
+        &self,
+        key: String,
+        entry: LibraryEntry,
+        kind: AssetKind,
+        api_page: u32,
+    ) -> Task<Message> {
+        let appid = entry.appid;
+        Task::perform(
+            list_sgdb(key, self.services.sgdb_base.clone(), entry, kind, api_page),
+            move |result| Message::SgdbListed {
+                appid,
+                kind,
+                api_page,
+                result,
+            },
+        )
+    }
+
+    fn apply_listed(
+        &mut self,
+        appid: u32,
+        kind: AssetKind,
+        api_page: u32,
+        result: Result<Vec<Candidate>, String>,
+    ) -> Task<Message> {
+        self.busy = false;
+        // The user moved on to another game or slot while the request ran.
+        if self.selected_appid() != Some(appid) || self.target != kind {
+            return Task::none();
+        }
+        let found = match result {
+            Ok(found) => found,
+            Err(message) => {
+                // Next must not ask for the failed API page again and again.
+                if let Some(results) = self.sgdb.as_mut() {
+                    results.more = false;
+                }
+                self.fail(message);
+                return Task::none();
+            }
+        };
+        if api_page == 0 {
+            if found.is_empty() {
+                self.status = Some(Status::Info(
+                    "No candidates came back. Try again or change the request.".to_string(),
+                ));
+                return Task::none();
+            }
+            self.sgdb = Some(SgdbResults::new(appid, kind, found));
+        } else {
+            let Some(results) = self.sgdb.as_mut() else {
+                return Task::none();
+            };
+            results.append(api_page, found);
+            // The Next press that asked for this API page moves on now.
+            if results.first_index() + GRID_CELLS < results.found.len() {
+                results.page += 1;
+            }
+        }
+        self.show_sgdb_count();
+        self.thumbs_task()
+    }
+
+    fn show_sgdb_count(&mut self) {
+        if let Some(results) = &self.sgdb {
+            let plus = if results.more { "+" } else { "" };
+            self.status = Some(Status::Info(format!(
+                "Candidates: {}{plus}. Apply one to save it.",
+                results.found.len()
+            )));
+        }
+    }
+
+    /// The task that loads the missing thumbnails of the SteamGridDB page.
+    fn thumbs_task(&self) -> Task<Message> {
+        let Some(results) = &self.sgdb else {
+            return Task::none();
+        };
+        let missing = results.thumbs_to_load();
+        if missing.is_empty() {
+            return Task::none();
+        }
+        let (appid, kind) = (results.appid, results.kind);
+        Task::perform(
+            load_thumbs(self.services.sgdb_base.clone(), missing),
+            move |thumbs| Message::SgdbThumbsLoaded {
+                appid,
+                kind,
+                thumbs,
+            },
+        )
+    }
+
+    fn apply_thumbs(&mut self, appid: u32, kind: AssetKind, thumbs: Vec<(u64, Option<Handle>)>) {
+        if let Some(results) = self.sgdb.as_mut()
+            && results.appid == appid
+            && results.kind == kind
+        {
+            results.thumbs.extend(thumbs);
+        }
+    }
+
+    fn previous_page(&mut self) -> Task<Message> {
+        match self.sgdb.as_mut() {
+            Some(results) if !self.busy && results.has_previous() => results.page -= 1,
+            _ => return Task::none(),
+        }
+        self.thumbs_task()
+    }
+
+    fn next_page(&mut self) -> Task<Message> {
+        if self.busy {
+            return Task::none();
+        }
+        let Some(results) = self.sgdb.as_mut() else {
+            return Task::none();
+        };
+        if !results.has_next() {
+            return Task::none();
+        }
+        if !results.next_needs_fetch() {
+            results.page += 1;
+            return self.thumbs_task();
+        }
+        let api_page = results.api_page + 1;
+        let Some(entry) = self.selected_entry().cloned() else {
+            return Task::none();
+        };
+        let Some(key) = self.services.secrets.get_key(Service::SteamGridDb) else {
+            self.fail("Set the SteamGridDB API key in Settings before you fetch art.");
+            return Task::none();
+        };
+        let kind = self.target;
+        self.busy = true;
+        self.list_task(key, entry, kind, api_page)
+    }
+
+    /// Downloads the full image of one SteamGridDB candidate. The reply
+    /// writes it.
+    fn apply_sgdb(&mut self, index: usize) -> Task<Message> {
+        if self.busy {
+            return Task::none();
+        }
+        let Some(results) = &self.sgdb else {
+            return Task::none();
+        };
+        let Some(candidate) = results.found.get(index).cloned() else {
+            self.fail("Pick a candidate before you apply it.");
+            return Task::none();
+        };
+        let (appid, kind) = (results.appid, results.kind);
+        self.busy = true;
+        self.status = Some(Status::Info("Downloading the full image...".to_string()));
+        Task::perform(
+            download_sgdb(self.services.sgdb_base.clone(), candidate, kind),
+            move |result| Message::SgdbDownloaded {
+                appid,
+                kind,
+                result,
+            },
+        )
+    }
+
+    fn apply_downloaded(
+        &mut self,
+        appid: u32,
+        kind: AssetKind,
+        result: Result<DynamicImage, String>,
+    ) {
+        self.busy = false;
+        match result {
+            Ok(image) => self.write_candidate(appid, kind, &image),
+            Err(message) => self.fail(format!("Cannot download the image: {message}")),
         }
     }
 
@@ -696,7 +1018,26 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             kind,
             result,
         } => state.apply_candidates(appid, kind, result),
+        Message::ApplyPressed(index) if state.sgdb.is_some() => return state.apply_sgdb(index),
         Message::ApplyPressed(index) => state.apply_candidate(index),
+        Message::SgdbListed {
+            appid,
+            kind,
+            api_page,
+            result,
+        } => return state.apply_listed(appid, kind, api_page, result),
+        Message::SgdbThumbsLoaded {
+            appid,
+            kind,
+            thumbs,
+        } => state.apply_thumbs(appid, kind, thumbs),
+        Message::SgdbPrevious => return state.previous_page(),
+        Message::SgdbNext => return state.next_page(),
+        Message::SgdbDownloaded {
+            appid,
+            kind,
+            result,
+        } => state.apply_downloaded(appid, kind, result),
     }
     Task::none()
 }
@@ -768,26 +1109,47 @@ fn joined_status(errors: Vec<String>) -> Option<Status> {
     (!errors.is_empty()).then(|| Status::Error(errors.join(" ")))
 }
 
-/// The images SteamGridDB offers for one slot, downloaded and fitted.
-async fn request_sgdb(
+/// One API page of the images SteamGridDB offers for one slot.
+async fn list_sgdb(
     key: String,
     base: String,
     entry: LibraryEntry,
     kind: AssetKind,
-) -> Result<Vec<DynamicImage>, String> {
-    let client = SgdbClient::new(&key, &base);
-    let found = client
-        .candidates(&entry, kind)
+    api_page: u32,
+) -> Result<Vec<Candidate>, String> {
+    SgdbClient::new(&key, &base)
+        .candidates_page(&entry, kind, api_page)
         .await
-        .map_err(|err| err.to_string())?;
-    let mut images = Vec::new();
-    for candidate in found.iter().take(usize::from(MAX_IMAGES_PER_REQUEST)) {
-        // One missing or broken image must not hide the other candidates.
-        if let Ok(image) = client.download(candidate, kind).await {
-            images.push(image);
-        }
+        .map_err(|err| err.to_string())
+}
+
+/// The thumbnails of `candidates` by ID; `None` for one that failed.
+async fn load_thumbs(base: String, candidates: Vec<Candidate>) -> Vec<(u64, Option<Handle>)> {
+    // Image URLs need no key.
+    let client = SgdbClient::new("", &base);
+    let mut thumbs = Vec::new();
+    for candidate in candidates {
+        let handle = client
+            .thumbnail(&candidate)
+            .await
+            .ok()
+            .map(Handle::from_bytes);
+        thumbs.push((candidate.id, handle));
     }
-    Ok(images)
+    thumbs
+}
+
+/// The full image of `candidate`, fitted to `kind`.
+async fn download_sgdb(
+    base: String,
+    candidate: Candidate,
+    kind: AssetKind,
+) -> Result<DynamicImage, String> {
+    // Image URLs need no key.
+    SgdbClient::new("", &base)
+        .download(&candidate, kind)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 /// Where Generate and Modify get their images.
@@ -1749,54 +2111,441 @@ mod tests {
         bytes.into_inner()
     }
 
-    #[tokio::test]
-    async fn request_sgdb_skips_a_failed_download() {
-        let server = MockServer::start().await;
-        let list = serde_json::json!({
-            "success": true,
-            "data": [
-                {
-                    "id": 11,
-                    "url": format!("{}/full/11.png", server.uri()),
-                    "thumb": format!("{}/thumb/11.png", server.uri())
-                },
-                {
-                    "id": 12,
-                    "url": format!("{}/full/12.png", server.uri()),
-                    "thumb": format!("{}/thumb/12.png", server.uri())
-                }
-            ]
-        });
-        Mock::given(method("GET"))
-            .and(path("/grids/steam/440"))
-            .and(query_param("dimensions", "600x900"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(list))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/full/11.png"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(png_bytes(600, 900)))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/full/12.png"))
-            .respond_with(ResponseTemplate::new(404))
-            .expect(1)
-            .mount(&server)
-            .await;
+    /// A SteamGridDB candidate with image URLs on `base`.
+    fn sgdb_candidate(base: &str, id: u64) -> Candidate {
+        Candidate {
+            id,
+            thumb_url: format!("{base}/thumb/{id}.png"),
+            full_url: format!("{base}/full/{id}.png"),
+        }
+    }
 
-        let images = request_sgdb(
+    fn sgdb_candidates(base: &str, ids: std::ops::RangeInclusive<u64>) -> Vec<Candidate> {
+        ids.map(|id| sgdb_candidate(base, id)).collect()
+    }
+
+    /// The message a SteamGridDB list request sends back.
+    fn listed(appid: u32, kind: AssetKind, api_page: u32, found: Vec<Candidate>) -> Message {
+        Message::SgdbListed {
+            appid,
+            kind,
+            api_page,
+            result: Ok(found),
+        }
+    }
+
+    /// Team Fortress 2 selected, Hero on the SteamGridDB tab, and a search
+    /// that found `found`.
+    fn state_with_sgdb(steam_root: Option<PathBuf>, found: Vec<Candidate>) -> State {
+        let mut state = state_with(
+            services(&[(Service::SteamGridDb, "sgdb-key")]),
+            steam_root,
+            vec![
+                steam_entry(440, "Team Fortress 2"),
+                steam_entry(570, "Dota 2"),
+            ],
+        );
+        send(&mut state, Message::EntrySelected(440));
+        pick(&mut state, AssetKind::Hero, PanelTab::SteamGridDb);
+        send(&mut state, Message::ActionPressed);
+        send(&mut state, listed(440, AssetKind::Hero, 0, found));
+        state
+    }
+
+    fn page_ids(state: &State) -> Vec<u64> {
+        let results = state.sgdb_results().expect("SteamGridDB results");
+        results.page_candidates().iter().map(|c| c.id).collect()
+    }
+
+    fn sgdb_list_body(base: &str, ids: std::ops::RangeInclusive<u64>) -> serde_json::Value {
+        let data: Vec<_> = ids
+            .map(|id| {
+                serde_json::json!({
+                    "id": id,
+                    "url": format!("{base}/full/{id}.png"),
+                    "thumb": format!("{base}/thumb/{id}.png"),
+                })
+            })
+            .collect();
+        serde_json::json!({"success": true, "data": data})
+    }
+
+    #[tokio::test]
+    async fn sgdb_search_keeps_every_result_and_shows_the_first_page() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/heroes/steam/440"))
+            .and(query_param("page", "0"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(sgdb_list_body(&server.uri(), 1..=6)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let found = list_sgdb(
             "sgdb-key".to_string(),
             server.uri(),
             steam_entry(440, "Team Fortress 2"),
-            AssetKind::Portrait,
+            AssetKind::Hero,
+            0,
         )
         .await
         .unwrap();
-        assert_eq!(images.len(), 1);
-        assert_eq!((images[0].width(), images[0].height()), (600, 900));
+        let state = state_with_sgdb(None, found);
+
+        let results = state.sgdb_results().expect("SteamGridDB results");
+        assert_eq!(results.candidates().len(), 6);
+        assert_eq!(page_ids(&state), [1, 2, 3, 4]);
+        assert_eq!(results.counter(), "1 to 4 of 6");
+        assert!(!results.has_previous());
+        assert!(results.has_next());
+        assert!(!state.busy());
+    }
+
+    #[test]
+    fn next_and_previous_move_by_four() {
+        let mut state = state_with_sgdb(None, sgdb_candidates("http://cdn", 1..=9));
+        send(&mut state, Message::SgdbPrevious);
+        assert_eq!(page_ids(&state), [1, 2, 3, 4]);
+
+        send(&mut state, Message::SgdbNext);
+        assert_eq!(page_ids(&state), [5, 6, 7, 8]);
+        assert_eq!(state.sgdb_results().unwrap().counter(), "5 to 8 of 9");
+        assert!(state.sgdb_results().unwrap().has_previous());
+
+        send(&mut state, Message::SgdbNext);
+        assert_eq!(page_ids(&state), [9]);
+        assert_eq!(state.sgdb_results().unwrap().counter(), "9 of 9");
+        assert!(!state.sgdb_results().unwrap().has_next());
+
+        // Next at the list edge does nothing.
+        send(&mut state, Message::SgdbNext);
+        assert_eq!(page_ids(&state), [9]);
+
+        send(&mut state, Message::SgdbPrevious);
+        assert_eq!(page_ids(&state), [5, 6, 7, 8]);
+    }
+
+    #[tokio::test]
+    async fn thumbnails_load_for_the_current_page_only() {
+        let server = MockServer::start().await;
+        for id in 1..=6 {
+            Mock::given(method("GET"))
+                .and(path(format!("/thumb/{id}.png")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(png_bytes(4, 6)))
+                .expect(if id <= 4 { 1 } else { 0 })
+                .mount(&server)
+                .await;
+        }
+        let mut state = state_with_sgdb(None, sgdb_candidates(&server.uri(), 1..=6));
+        let thumbs =
+            load_thumbs(server.uri(), state.sgdb_results().unwrap().thumbs_to_load()).await;
+        assert_eq!(thumbs.len(), 4);
+        send(
+            &mut state,
+            Message::SgdbThumbsLoaded {
+                appid: 440,
+                kind: AssetKind::Hero,
+                thumbs,
+            },
+        );
+        let results = state.sgdb_results().unwrap();
+        assert!(matches!(results.thumb(1), Thumb::Ready(_)));
+        assert!(matches!(results.thumb(5), Thumb::Loading));
+        // The loaded thumbnails are not loaded again.
+        assert!(results.thumbs_to_load().is_empty());
+    }
+
+    #[test]
+    fn a_failed_thumbnail_shows_as_failed() {
+        let mut state = state_with_sgdb(None, sgdb_candidates("http://cdn", 1..=2));
+        send(
+            &mut state,
+            Message::SgdbThumbsLoaded {
+                appid: 440,
+                kind: AssetKind::Hero,
+                thumbs: vec![(1, None), (2, Some(pixel()))],
+            },
+        );
+        let results = state.sgdb_results().unwrap();
+        assert!(matches!(results.thumb(1), Thumb::Failed));
+        assert!(matches!(results.thumb(2), Thumb::Ready(_)));
+    }
+
+    #[test]
+    fn thumbnails_for_another_slot_are_dropped() {
+        let mut state = state_with_sgdb(None, sgdb_candidates("http://cdn", 1..=2));
+        send(
+            &mut state,
+            Message::SgdbThumbsLoaded {
+                appid: 440,
+                kind: AssetKind::Logo,
+                thumbs: vec![(1, Some(pixel()))],
+            },
+        );
+        assert!(matches!(
+            state.sgdb_results().unwrap().thumb(1),
+            Thumb::Loading
+        ));
+    }
+
+    #[tokio::test]
+    async fn apply_downloads_only_the_chosen_full_image() {
+        let server = MockServer::start().await;
+        for id in 1..=6 {
+            Mock::given(method("GET"))
+                .and(path(format!("/full/{id}.png")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(png_bytes(1920, 640)))
+                .expect(if id == 6 { 1 } else { 0 })
+                .mount(&server)
+                .await;
+        }
+        let temp = TempDir::new().unwrap();
+        let mut state = state_with_sgdb(
+            Some(temp.path().to_path_buf()),
+            sgdb_candidates(&server.uri(), 1..=6),
+        );
+        send(&mut state, Message::SgdbNext);
+        send(&mut state, Message::ApplyPressed(5));
+        assert!(state.busy());
+
+        let chosen = state.sgdb_results().unwrap().candidates()[5].clone();
+        let result = download_sgdb(server.uri(), chosen, AssetKind::Hero).await;
+        send(
+            &mut state,
+            Message::SgdbDownloaded {
+                appid: 440,
+                kind: AssetKind::Hero,
+                result,
+            },
+        );
+
+        assert!(!state.busy());
+        let written = temp
+            .path()
+            .join("userdata")
+            .join(ACCOUNT_ID.to_string())
+            .join("config/grid/440_hero.png");
+        let image = image::open(&written).unwrap();
+        assert_eq!((image.width(), image.height()), (1920, 620));
+        assert!(matches!(
+            state.slot_art(AssetKind::Hero),
+            SlotArt::Custom(_)
+        ));
+        assert!(!state.status().unwrap().is_error());
+    }
+
+    #[test]
+    fn a_failed_download_keeps_the_page() {
+        let temp = TempDir::new().unwrap();
+        let mut state = state_with_sgdb(
+            Some(temp.path().to_path_buf()),
+            sgdb_candidates("http://cdn", 1..=6),
+        );
+        send(&mut state, Message::SgdbNext);
+        send(&mut state, Message::ApplyPressed(4));
+        send(
+            &mut state,
+            Message::SgdbDownloaded {
+                appid: 440,
+                kind: AssetKind::Hero,
+                result: Err("SteamGridDB returned HTTP 404".to_string()),
+            },
+        );
+        assert!(!state.busy());
+        let status = state.status().expect("a status line");
+        assert!(status.is_error(), "{}", status.text());
+        assert!(status.text().contains("HTTP 404"), "{}", status.text());
+        assert_eq!(page_ids(&state), [5, 6]);
+    }
+
+    #[test]
+    fn apply_while_busy_does_nothing() {
+        let mut state = state_with_sgdb(None, sgdb_candidates("http://cdn", 1..=2));
+        send(&mut state, Message::ApplyPressed(0));
+        assert!(state.busy());
+        send(&mut state, Message::ApplyPressed(1));
+        // A second press while the first download runs changes nothing.
+        assert!(state.busy());
+        assert!(state.status().is_none_or(|status| !status.is_error()));
+    }
+
+    #[test]
+    fn a_new_search_or_target_or_entry_resets_to_page_one() {
+        let mut state = state_with_sgdb(None, sgdb_candidates("http://cdn", 1..=9));
+        send(&mut state, Message::SgdbNext);
+        send(&mut state, Message::ActionPressed);
+        assert!(state.sgdb_results().is_none());
+        send(
+            &mut state,
+            listed(
+                440,
+                AssetKind::Hero,
+                0,
+                sgdb_candidates("http://cdn", 1..=9),
+            ),
+        );
+        assert_eq!(page_ids(&state), [1, 2, 3, 4]);
+
+        send(&mut state, Message::SgdbNext);
+        send(&mut state, Message::TargetSelected(AssetKind::Logo));
+        assert!(state.sgdb_results().is_none());
+
+        send(&mut state, Message::TargetSelected(AssetKind::Hero));
+        send(&mut state, Message::ActionPressed);
+        send(
+            &mut state,
+            listed(
+                440,
+                AssetKind::Hero,
+                0,
+                sgdb_candidates("http://cdn", 1..=9),
+            ),
+        );
+        send(&mut state, Message::SgdbNext);
+        send(&mut state, Message::EntrySelected(570));
+        assert!(state.sgdb_results().is_none());
+    }
+
+    #[test]
+    fn a_list_reply_for_another_entry_is_dropped() {
+        let mut state = state_with(
+            services(&[(Service::SteamGridDb, "sgdb-key")]),
+            None,
+            vec![
+                steam_entry(440, "Team Fortress 2"),
+                steam_entry(570, "Dota 2"),
+            ],
+        );
+        send(&mut state, Message::EntrySelected(440));
+        pick(&mut state, AssetKind::Hero, PanelTab::SteamGridDb);
+        send(&mut state, Message::ActionPressed);
+        send(&mut state, Message::EntrySelected(570));
+        send(
+            &mut state,
+            listed(
+                440,
+                AssetKind::Hero,
+                0,
+                sgdb_candidates("http://cdn", 1..=2),
+            ),
+        );
+        assert!(!state.busy());
+        assert!(state.sgdb_results().is_none());
+    }
+
+    #[test]
+    fn an_empty_search_shows_a_message() {
+        let state = state_with_sgdb(None, Vec::new());
+        assert!(state.sgdb_results().is_none());
+        let status = state.status().expect("a status line");
+        assert!(status.text().contains("No candidates"), "{}", status.text());
+    }
+
+    #[test]
+    fn a_failed_search_shows_the_error() {
+        let mut state = state_with_sgdb(None, Vec::new());
+        send(&mut state, Message::ActionPressed);
+        send(
+            &mut state,
+            Message::SgdbListed {
+                appid: 440,
+                kind: AssetKind::Hero,
+                api_page: 0,
+                result: Err("SteamGridDB returned HTTP 500".to_string()),
+            },
+        );
+        assert!(!state.busy());
+        assert_eq!(
+            state.status().map(Status::text),
+            Some("SteamGridDB returned HTTP 500")
+        );
+    }
+
+    #[test]
+    fn next_past_a_full_api_page_fetches_the_next_api_page() {
+        let full = crate::sgdb::SGDB_PAGE_SIZE as u64;
+        let mut state = state_with_sgdb(None, sgdb_candidates("http://cdn", 1..=full));
+        let results = state.sgdb_results().unwrap();
+        assert_eq!(results.counter(), format!("1 to 4 of {full}+"));
+        // Go to the page before the last loaded page (items 45 to 48).
+        for _ in 0..11 {
+            send(&mut state, Message::SgdbNext);
+        }
+        assert_eq!(page_ids(&state), [45, 46, 47, 48]);
+        assert!(!state.busy());
+
+        // The next page needs items the app has not loaded yet.
+        send(&mut state, Message::SgdbNext);
+        assert!(state.busy());
+        assert_eq!(page_ids(&state), [45, 46, 47, 48]);
+
+        send(
+            &mut state,
+            listed(
+                440,
+                AssetKind::Hero,
+                1,
+                sgdb_candidates("http://cdn", full + 1..=full + 3),
+            ),
+        );
+        assert!(!state.busy());
+        let results = state.sgdb_results().unwrap();
+        assert_eq!(results.candidates().len(), 53);
+        assert_eq!(page_ids(&state), [49, 50, 51, 52]);
+        assert_eq!(results.counter(), "49 to 52 of 53");
+
+        send(&mut state, Message::SgdbNext);
+        assert!(!state.busy());
+        assert_eq!(page_ids(&state), [53]);
+    }
+
+    #[test]
+    fn a_failed_api_page_ends_the_list_and_keeps_the_loaded_images() {
+        let full = crate::sgdb::SGDB_PAGE_SIZE as u64;
+        let mut state = state_with_sgdb(None, sgdb_candidates("http://cdn", 1..=full));
+        for _ in 0..12 {
+            send(&mut state, Message::SgdbNext);
+        }
+        send(
+            &mut state,
+            Message::SgdbListed {
+                appid: 440,
+                kind: AssetKind::Hero,
+                api_page: 1,
+                result: Err("SteamGridDB returned HTTP 500".to_string()),
+            },
+        );
+        assert!(state.status().unwrap().is_error());
+        assert_eq!(page_ids(&state), [45, 46, 47, 48]);
+        // Next now shows the last loaded images and asks for nothing.
+        send(&mut state, Message::SgdbNext);
+        assert!(!state.busy());
+        assert_eq!(page_ids(&state), [49, 50]);
+    }
+
+    #[test]
+    fn an_api_page_with_no_new_images_ends_the_list() {
+        let full = crate::sgdb::SGDB_PAGE_SIZE as u64;
+        let mut state = state_with_sgdb(None, sgdb_candidates("http://cdn", 1..=full));
+        for _ in 0..12 {
+            send(&mut state, Message::SgdbNext);
+        }
+        // The API ignored the page number and sent page 0 again.
+        send(
+            &mut state,
+            listed(
+                440,
+                AssetKind::Hero,
+                1,
+                sgdb_candidates("http://cdn", 1..=full),
+            ),
+        );
+        let results = state.sgdb_results().unwrap();
+        assert_eq!(results.candidates().len(), 50);
+        assert_eq!(page_ids(&state), [49, 50]);
+        assert!(!results.has_next());
+        assert_eq!(results.counter(), "49 to 50 of 50");
     }
 
     fn pixel() -> Handle {
