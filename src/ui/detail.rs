@@ -1,13 +1,11 @@
 //! The detail view in the center: the game title and the four slots.
 
 use iced::widget::image::Handle;
-use iced::widget::{button, center, column, container, image, mouse_area, row, rule, text};
+use iced::widget::{center, column, container, image, mouse_area, row, rule, text};
 use iced::{Border, ContentFit, Element, Length, Theme};
 
-use crate::app::{Message, PanelTab, State};
+use crate::app::{Message, State};
 use crate::assets::AssetKind;
-
-use super::panel::modify_enabled;
 
 /// The image a slot shows.
 #[derive(Debug, Clone)]
@@ -50,11 +48,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
     let wide = slot(state, AssetKind::Wide, Length::Fill, 220.0);
     let logo = row![
         frame(state, AssetKind::Logo, Length::Fixed(320.0), 120.0),
-        column![
-            caption(AssetKind::Logo),
-            slot_buttons(state, AssetKind::Logo)
-        ]
-        .spacing(8),
+        caption(AssetKind::Logo),
     ]
     .spacing(16)
     .align_y(iced::Alignment::Center);
@@ -73,16 +67,12 @@ pub fn view(state: &State) -> Element<'_, Message> {
     .into()
 }
 
-/// One slot: the image frame, the caption and the three buttons.
+/// One slot: the image frame and the caption.
 fn slot(state: &State, kind: AssetKind, width: Length, height: f32) -> Element<'_, Message> {
-    column![
-        frame(state, kind, width, height),
-        caption(kind),
-        slot_buttons(state, kind),
-    ]
-    .spacing(8)
-    .width(width)
-    .into()
+    column![frame(state, kind, width, height), caption(kind)]
+        .spacing(8)
+        .width(width)
+        .into()
 }
 
 fn caption(kind: AssetKind) -> Element<'static, Message> {
@@ -133,27 +123,6 @@ fn frame_style(theme: &Theme, target: bool) -> container::Style {
         },
         ..container::Style::default()
     }
-}
-
-fn slot_buttons(state: &State, kind: AssetKind) -> Element<'_, Message> {
-    let action = |label: &'static str, tab: PanelTab| {
-        button(text(label).size(13))
-            .style(button::secondary)
-            .on_press(Message::SlotAction(kind, tab))
-    };
-    let modify = button(text("Modify").size(13))
-        .style(button::secondary)
-        .on_press_maybe(
-            modify_enabled(state.slot_art(kind))
-                .then_some(Message::SlotAction(kind, PanelTab::Modify)),
-        );
-    row![
-        action("SteamGridDB", PanelTab::SteamGridDb),
-        action("Generate", PanelTab::Generate),
-        modify,
-    ]
-    .spacing(8)
-    .into()
 }
 
 #[cfg(test)]

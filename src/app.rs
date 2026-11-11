@@ -120,8 +120,6 @@ pub enum Message {
     FilterChanged(String),
     /// The user picked a library entry.
     EntrySelected(u32),
-    /// A slot button: it sets the target and opens the matching tab.
-    SlotAction(AssetKind, PanelTab),
     /// The user picked a panel tab.
     TabSelected(PanelTab),
     /// The prompt text changed.
@@ -654,10 +652,6 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::Loaded(loaded) => return state.apply_loaded(*loaded),
         Message::FilterChanged(text) => state.filter = text,
         Message::EntrySelected(appid) => return state.select(appid),
-        Message::SlotAction(kind, tab) => {
-            state.set_target(kind);
-            state.tab = tab;
-        }
         Message::TargetSelected(kind) => state.set_target(kind),
         Message::TabSelected(tab) => state.tab = tab,
         Message::PromptChanged(text) => state.set_prompt(text),
@@ -1173,6 +1167,12 @@ mod tests {
         drop(update(state, message));
     }
 
+    /// Picks the target slot and the panel tab, as the user does in the panel.
+    fn pick(state: &mut State, kind: AssetKind, tab: PanelTab) {
+        send(state, Message::TargetSelected(kind));
+        send(state, Message::TabSelected(tab));
+    }
+
     fn state_names(state: &State) -> Vec<String> {
         state
             .visible_entries()
@@ -1224,22 +1224,6 @@ mod tests {
     }
 
     #[test]
-    fn slot_button_sets_the_target_and_the_tab() {
-        let mut state = state_with(
-            services(&[]),
-            None,
-            vec![steam_entry(440, "Team Fortress 2")],
-        );
-        for kind in AssetKind::ALL {
-            for tab in PanelTab::ALL {
-                send(&mut state, Message::SlotAction(kind, tab));
-                assert_eq!(state.target(), kind);
-                assert_eq!(state.tab(), tab);
-            }
-        }
-    }
-
-    #[test]
     fn filter_text_narrows_the_list() {
         let mut state = state_with(
             services(&[]),
@@ -1267,10 +1251,7 @@ mod tests {
             vec![steam_entry(440, "Team Fortress 2")],
         );
         send(&mut state, Message::EntrySelected(440));
-        send(
-            &mut state,
-            Message::SlotAction(AssetKind::Hero, PanelTab::SteamGridDb),
-        );
+        pick(&mut state, AssetKind::Hero, PanelTab::SteamGridDb);
         send(
             &mut state,
             candidates(440, AssetKind::Hero, vec![solid(1920, 620)]),
@@ -1300,10 +1281,7 @@ mod tests {
             vec![steam_entry(440, "Team Fortress 2")],
         );
         send(&mut state, Message::EntrySelected(440));
-        send(
-            &mut state,
-            Message::SlotAction(AssetKind::Hero, PanelTab::SteamGridDb),
-        );
+        pick(&mut state, AssetKind::Hero, PanelTab::SteamGridDb);
         send(
             &mut state,
             candidates(440, AssetKind::Hero, vec![solid(1920, 620)]),
@@ -1330,18 +1308,12 @@ mod tests {
             vec![steam_entry(440, "Team Fortress 2")],
         );
         send(&mut state, Message::EntrySelected(440));
-        send(
-            &mut state,
-            Message::SlotAction(AssetKind::Hero, PanelTab::SteamGridDb),
-        );
+        pick(&mut state, AssetKind::Hero, PanelTab::SteamGridDb);
         send(
             &mut state,
             candidates(440, AssetKind::Hero, vec![solid(1920, 620)]),
         );
-        send(
-            &mut state,
-            Message::SlotAction(AssetKind::Portrait, PanelTab::SteamGridDb),
-        );
+        pick(&mut state, AssetKind::Portrait, PanelTab::SteamGridDb);
         assert!(state.candidates().is_empty());
 
         send(&mut state, Message::ApplyPressed(0));
@@ -1366,10 +1338,7 @@ mod tests {
             ],
         );
         send(&mut state, Message::EntrySelected(440));
-        send(
-            &mut state,
-            Message::SlotAction(AssetKind::Hero, PanelTab::SteamGridDb),
-        );
+        pick(&mut state, AssetKind::Hero, PanelTab::SteamGridDb);
         send(&mut state, Message::ActionPressed);
         assert!(state.busy());
 
@@ -1392,10 +1361,7 @@ mod tests {
             vec![steam_entry(440, "Team Fortress 2")],
         );
         send(&mut state, Message::EntrySelected(440));
-        send(
-            &mut state,
-            Message::SlotAction(AssetKind::Portrait, PanelTab::SteamGridDb),
-        );
+        pick(&mut state, AssetKind::Portrait, PanelTab::SteamGridDb);
         send(
             &mut state,
             candidates(440, AssetKind::Hero, vec![solid(1920, 620)]),
@@ -1427,10 +1393,7 @@ mod tests {
             vec![steam_entry(440, "Team Fortress 2")],
         );
         send(&mut state, Message::EntrySelected(440));
-        send(
-            &mut state,
-            Message::SlotAction(AssetKind::Hero, PanelTab::SteamGridDb),
-        );
+        pick(&mut state, AssetKind::Hero, PanelTab::SteamGridDb);
         send(&mut state, Message::ActionPressed);
 
         assert!(!state.busy());
@@ -1457,10 +1420,7 @@ mod tests {
             vec![steam_entry(440, "Team Fortress 2")],
         );
         send(&mut state, Message::EntrySelected(440));
-        send(
-            &mut state,
-            Message::SlotAction(AssetKind::Wide, PanelTab::Generate),
-        );
+        pick(&mut state, AssetKind::Wide, PanelTab::Generate);
         send(&mut state, Message::ActionPressed);
 
         assert!(!state.busy());
@@ -1481,10 +1441,7 @@ mod tests {
             vec![steam_entry(440, "Team Fortress 2")],
         );
         send(&mut state, Message::EntrySelected(440));
-        send(
-            &mut state,
-            Message::SlotAction(AssetKind::Hero, PanelTab::Generate),
-        );
+        pick(&mut state, AssetKind::Hero, PanelTab::Generate);
         send(
             &mut state,
             Message::CandidatesArrived {
@@ -1507,10 +1464,7 @@ mod tests {
             vec![steam_entry(440, "Team Fortress 2")],
         );
         send(&mut state, Message::EntrySelected(440));
-        send(
-            &mut state,
-            Message::SlotAction(AssetKind::Hero, PanelTab::SteamGridDb),
-        );
+        pick(&mut state, AssetKind::Hero, PanelTab::SteamGridDb);
         send(&mut state, candidates(440, AssetKind::Hero, Vec::new()));
         assert!(state.candidates().is_empty());
         let status = state.status().expect("a status line");
@@ -1526,10 +1480,7 @@ mod tests {
             vec![steam_entry(440, "Team Fortress 2")],
         );
         send(&mut state, Message::EntrySelected(440));
-        send(
-            &mut state,
-            Message::SlotAction(AssetKind::Wide, PanelTab::SteamGridDb),
-        );
+        pick(&mut state, AssetKind::Wide, PanelTab::SteamGridDb);
         send(&mut state, Message::ActionPressed);
         assert!(state.busy());
         assert!(state.candidates().is_empty());
@@ -1552,10 +1503,7 @@ mod tests {
             None,
             vec![steam_entry(440, "Team Fortress 2")],
         );
-        send(
-            &mut state,
-            Message::SlotAction(AssetKind::Logo, PanelTab::Generate),
-        );
+        pick(&mut state, AssetKind::Logo, PanelTab::Generate);
         send(&mut state, Message::ActionPressed);
         assert!(!state.busy());
         let status = state.status().expect("a status line");
@@ -1915,10 +1863,7 @@ mod tests {
             Some(temp.path().to_path_buf()),
             vec![(AssetKind::Hero, SlotArt::Empty)],
         );
-        send(
-            &mut state,
-            Message::SlotAction(AssetKind::Hero, PanelTab::SteamGridDb),
-        );
+        pick(&mut state, AssetKind::Hero, PanelTab::SteamGridDb);
         send(
             &mut state,
             candidates(440, AssetKind::Hero, vec![solid(1920, 620)]),
@@ -1962,10 +1907,7 @@ mod tests {
             Some(PathBuf::from("/steam")),
             vec![(AssetKind::Portrait, SlotArt::Empty)],
         );
-        send(
-            &mut state,
-            Message::SlotAction(AssetKind::Portrait, PanelTab::Modify),
-        );
+        pick(&mut state, AssetKind::Portrait, PanelTab::Modify);
         assert!(!state.can_modify());
         send(&mut state, Message::ActionPressed);
         assert!(!state.busy());
@@ -1996,10 +1938,7 @@ mod tests {
         );
         state.config.image_source = ImageSource::Codex;
         send(&mut state, Message::EntrySelected(440));
-        send(
-            &mut state,
-            Message::SlotAction(AssetKind::Hero, PanelTab::Generate),
-        );
+        pick(&mut state, AssetKind::Hero, PanelTab::Generate);
         send(&mut state, Message::ActionPressed);
 
         assert!(state.busy());
@@ -2015,10 +1954,7 @@ mod tests {
             vec![(AssetKind::Portrait, SlotArt::Default(pixel()))],
         );
         state.config.image_source = ImageSource::Codex;
-        send(
-            &mut state,
-            Message::SlotAction(AssetKind::Portrait, PanelTab::Modify),
-        );
+        pick(&mut state, AssetKind::Portrait, PanelTab::Modify);
         send(&mut state, Message::ActionPressed);
         assert!(state.busy());
         assert!(!state.status().is_some_and(Status::is_error));
