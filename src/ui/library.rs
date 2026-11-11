@@ -8,11 +8,12 @@ use crate::steam::library::{EntrySource, LibraryEntry};
 
 use super::tag_style;
 
-/// The tag a library row shows for the source of an entry.
-pub fn tag_text(source: EntrySource) -> &'static str {
+/// The tag a library row shows for the source of an entry. Only a
+/// non-Steam shortcut gets a tag, because almost every entry is a Steam game.
+pub fn tag_text(source: EntrySource) -> Option<&'static str> {
     match source {
-        EntrySource::Steam => "Steam",
-        EntrySource::NonSteam => "Non-Steam",
+        EntrySource::Steam => None,
+        EntrySource::NonSteam => Some("Non-Steam"),
     }
 }
 
@@ -60,10 +61,14 @@ pub fn view(state: &State) -> Element<'_, Message> {
 }
 
 fn entry_row(entry: &LibraryEntry, selected: bool) -> Element<'_, Message> {
-    let tag = container(text(tag_text(entry.source)).size(12))
-        .padding([2, 8])
-        .style(tag_style);
-    let mut tags = row![tag].spacing(8).align_y(iced::Alignment::Center);
+    let mut tags = row![].spacing(8).align_y(iced::Alignment::Center);
+    if let Some(tag) = tag_text(entry.source) {
+        tags = tags.push(
+            container(text(tag).size(12))
+                .padding([2, 8])
+                .style(tag_style),
+        );
+    }
     if let Some(note) = install_note(entry) {
         tags = tags.push(text(note).size(12).style(text::secondary));
     }
@@ -93,13 +98,13 @@ mod tests {
     }
 
     #[test]
-    fn steam_entry_has_the_steam_tag() {
-        assert_eq!(tag_text(EntrySource::Steam), "Steam");
+    fn steam_entry_has_no_tag() {
+        assert_eq!(tag_text(EntrySource::Steam), None);
     }
 
     #[test]
     fn shortcut_has_the_non_steam_tag() {
-        assert_eq!(tag_text(EntrySource::NonSteam), "Non-Steam");
+        assert_eq!(tag_text(EntrySource::NonSteam), Some("Non-Steam"));
     }
 
     #[test]
