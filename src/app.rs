@@ -670,7 +670,8 @@ pub async fn load_library(input: StartupInput) -> LoadedLibrary {
 
     let mut user: Option<SteamUser> = None;
     match users::most_recent_user(&steam_root) {
-        Ok(found) => user = found,
+        Ok(Some(found)) => user = Some(found),
+        Ok(None) => errors.push("Cannot find a Steam user in loginusers.vdf.".to_string()),
         Err(err) => errors.push(format!("Cannot read the Steam user: {err}")),
     }
     let account_id = user.map(|user| user.account_id);
@@ -1579,6 +1580,29 @@ mod tests {
             .find(|entry| entry.appid == 440)
             .expect("Team Fortress 2");
         assert!(tf2.installed);
+    }
+
+    #[tokio::test]
+    async fn startup_without_a_steam_user_shows_an_error() {
+        let root = temp_steam_root();
+        fs::write(
+            root.path().join("config/loginusers.vdf"),
+            "\"users\"\n{\n\t\"76561198000000001\"\n\t{\n\t\t\"AccountName\"\t\t\"acidburn\"\n\t}\n}\n",
+        )
+        .unwrap();
+        let config = config_file(root.path());
+        let loaded = load_library(startup_input(
+            Some(config.path().join("config.toml")),
+            None,
+            "http://127.0.0.1:1",
+        ))
+        .await;
+
+        assert_eq!(loaded.account_id, None);
+        assert_eq!(entry_names(&loaded.entries), ["Dota 2", "Team Fortress 2"]);
+        let status = loaded.status.as_ref().expect("a status line");
+        assert!(status.is_error(), "{}", status.text());
+        assert!(status.text().contains("Steam user"), "{}", status.text());
     }
 
     #[tokio::test]

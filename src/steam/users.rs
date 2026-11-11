@@ -13,22 +13,30 @@ pub struct SteamUser {
 }
 
 /// Parses the text of `loginusers.vdf` and returns the user with
-/// `MostRecent "1"`, or `None` when no user has it.
+/// `MostRecent "1"`. Current Steam clients do not write `MostRecent`, so
+/// without it the user with the newest `Timestamp` wins. `None` when no
+/// user has either key.
 pub fn parse_most_recent_user(text: &str) -> Result<Option<SteamUser>, SteamError> {
     let users = parse_vdf(text, "loginusers.vdf")?;
+    let mut newest: Option<(u64, SteamUser)> = None;
     for (key, values) in users.iter() {
         let Some(user) = values.first().and_then(|value| value.get_obj()) else {
             continue;
         };
-        if get_str(user, "MostRecent") != Some("1") {
-            continue;
-        }
         let Some(steam_user) = steam_user_from_id64(key) else {
             continue;
         };
-        return Ok(Some(steam_user));
+        if get_str(user, "MostRecent") == Some("1") {
+            return Ok(Some(steam_user));
+        }
+        let timestamp = get_str(user, "Timestamp").and_then(|value| value.parse::<u64>().ok());
+        if let Some(timestamp) = timestamp
+            && newest.is_none_or(|(best, _)| timestamp > best)
+        {
+            newest = Some((timestamp, steam_user));
+        }
     }
-    Ok(None)
+    Ok(newest.map(|(_, steam_user)| steam_user))
 }
 
 fn steam_user_from_id64(key: &str) -> Option<SteamUser> {
@@ -120,6 +128,58 @@ mod tests {
         assert_eq!(
             parse_most_recent_user(text).unwrap().map(|u| u.account_id),
             Some(22_202)
+        );
+    }
+
+    #[test]
+    fn without_most_recent_the_newest_timestamp_wins() {
+        // The shape current Steam clients write: no MostRecent key.
+        let text = r#"
+"users"
+{
+    "76561198000000002"
+    {
+        "AccountName"    "zerocool"
+        "AutoLogin"      "1"
+        "timestamp"      "1794322229"
+    }
+    "76561198000000003"
+    {
+        "AccountName"    "acidburn"
+        "AutoLogin"      "0"
+        "timestamp"      "1710104072"
+    }
+}
+"#;
+        assert_eq!(
+            parse_most_recent_user(text).unwrap(),
+            Some(SteamUser {
+                steam_id64: 76_561_198_000_000_002,
+                account_id: 39_734_274,
+            })
+        );
+    }
+
+    #[test]
+    fn most_recent_wins_over_a_newer_timestamp() {
+        let text = r#"
+"users"
+{
+    "76561197960287930"
+    {
+        "MostRecent"     "0"
+        "Timestamp"      "1794322229"
+    }
+    "76561198000000001"
+    {
+        "MostRecent"     "1"
+        "Timestamp"      "1710104072"
+    }
+}
+"#;
+        assert_eq!(
+            parse_most_recent_user(text).unwrap().map(|u| u.account_id),
+            Some(39_734_273)
         );
     }
 
