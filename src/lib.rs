@@ -1,5 +1,6 @@
 pub mod app;
 pub mod assets;
+pub mod codex;
 pub mod config;
 pub mod imaging;
 pub mod openai;

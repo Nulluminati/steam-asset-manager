@@ -10,7 +10,8 @@ use iced::{Element, Task};
 use image::DynamicImage;
 
 use crate::assets::AssetKind;
-use crate::config::{self, Config};
+use crate::codex::{CodexClient, CodexRunner, CodexStatus, SystemCodex};
+use crate::config::{self, Config, ImageSource};
 use crate::openai::{CANDIDATE_COUNT, OpenAiClient};
 use crate::secrets::{Secrets, Service};
 use crate::sgdb::SgdbClient;
@@ -63,7 +64,7 @@ impl Status {
 }
 
 /// The parts of the environment that `update` reads: keys, the Steam
-/// environment, HTTP base URLs and the config file.
+/// environment, HTTP base URLs, the config file and the Codex program.
 pub struct Services {
     pub secrets: Secrets,
     pub env: Arc<dyn PathEnv + Send + Sync>,
@@ -72,6 +73,9 @@ pub struct Services {
     pub sgdb_base: String,
     pub openai_base: String,
     pub steam_cdn_base: String,
+    pub codex: Arc<dyn CodexRunner>,
+    /// The Codex home folder, where Codex saves its images.
+    pub codex_home: Option<PathBuf>,
 }
 
 impl Default for Services {
@@ -84,6 +88,8 @@ impl Default for Services {
             sgdb_base: crate::sgdb::SGDB_BASE.to_string(),
             openai_base: crate::openai::OPENAI_BASE.to_string(),
             steam_cdn_base: crate::steam::defaults::STEAM_CDN_BASE.to_string(),
+            codex: Arc::new(SystemCodex),
+            codex_home: paths::codex_home(std::env::var_os("CODEX_HOME"), SystemEnv.home_dir()),
         }
     }
 }
@@ -144,6 +150,10 @@ pub enum Message {
     SettingsOpened,
     SettingsClosed,
     SettingsChanged(SettingsField, String),
+    /// The image source option of the settings dialog.
+    ImageSourceSelected(ImageSource),
+    /// The settings dialog finished looking for Codex.
+    CodexChecked(CodexStatus),
     SettingsSaved,
 }
 
@@ -390,8 +400,13 @@ impl State {
         self.prompt = text;
     }
 
-    fn open_settings(&mut self) {
+    /// Opens the dialog and starts the task that looks for Codex.
+    fn open_settings(&mut self) -> Task<Message> {
         self.settings = Some(SettingsForm::new(&self.services.secrets, &self.config));
+        Task::perform(
+            check_codex(self.services.codex.clone()),
+            Message::CodexChecked,
+        )
     }
 
     /// Writes the changed keys and the config, then loads the library
@@ -431,6 +446,38 @@ impl State {
         self.busy = true;
         self.drop_candidates();
         self.status = None;
+    }
+
+    /// Like `begin_request`. A Codex request also says that it is slow.
+    fn begin_request_with(&mut self, backend: &ImageBackend) {
+        self.begin_request();
+        if let ImageBackend::Codex(_) = backend {
+            self.status = Some(Status::Info(
+                "Codex makes four images. This can take several minutes.".to_string(),
+            ));
+        }
+    }
+
+    /// The image source of the config, or a status line when the OpenAI API
+    /// has no key.
+    fn image_backend(&mut self) -> Option<ImageBackend> {
+        match self.config.image_source {
+            ImageSource::Codex => Some(ImageBackend::Codex(CodexClient::new(
+                self.services.codex.clone(),
+                self.services.codex_home.clone(),
+            ))),
+            ImageSource::OpenAiApi => {
+                let Some(key) = self.services.secrets.get_key(Service::OpenAi) else {
+                    self.fail("Set the OpenAI API key in Settings before you make art.");
+                    return None;
+                };
+                Some(ImageBackend::Api {
+                    key,
+                    model: self.config.openai_model.clone(),
+                    base: self.services.openai_base.clone(),
+                })
+            }
+        }
     }
 
     fn apply_candidates(
@@ -541,19 +588,12 @@ impl State {
                 )
             }
             PanelTab::Generate => {
-                let Some(key) = self.services.secrets.get_key(Service::OpenAi) else {
-                    self.fail("Set the OpenAI API key in Settings before you make art.");
+                let Some(backend) = self.image_backend() else {
                     return Task::none();
                 };
-                self.begin_request();
+                self.begin_request_with(&backend);
                 Task::perform(
-                    request_generate(
-                        key,
-                        self.config.openai_model.clone(),
-                        self.services.openai_base.clone(),
-                        self.prompt.clone(),
-                        kind,
-                    ),
+                    request_generate(backend, self.prompt.clone(), kind),
                     move |result| Message::CandidatesArrived {
                         appid,
                         kind,
@@ -566,15 +606,14 @@ impl State {
                     self.fail("This slot has no current art to modify. Apply art first.");
                     return Task::none();
                 }
-                let Some(key) = self.services.secrets.get_key(Service::OpenAi) else {
-                    self.fail("Set the OpenAI API key in Settings before you make art.");
+                let Some(backend) = self.image_backend() else {
                     return Task::none();
                 };
-                let request = match self.modify_request(key, entry, kind) {
+                let request = match self.modify_request(backend, entry, kind) {
                     Some(request) => request,
                     None => return Task::none(),
                 };
-                self.begin_request();
+                self.begin_request_with(&request.backend);
                 Task::perform(request_modify(request), move |result| {
                     Message::CandidatesArrived {
                         appid,
@@ -590,7 +629,7 @@ impl State {
     /// knows no Steam folder or user.
     fn modify_request(
         &mut self,
-        key: String,
+        backend: ImageBackend,
         entry: LibraryEntry,
         kind: AssetKind,
     ) -> Option<ModifyRequest> {
@@ -599,9 +638,7 @@ impl State {
             return None;
         };
         Some(ModifyRequest {
-            key,
-            model: self.config.openai_model.clone(),
-            base: self.services.openai_base.clone(),
+            backend,
             cdn_base: self.services.steam_cdn_base.clone(),
             cache_dir: defaults::library_cache_dir(&root),
             custom: grid::current_custom(&grid::grid_dir(&root, account_id), entry.appid, kind),
@@ -626,7 +663,17 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::PromptChanged(text) => state.set_prompt(text),
         Message::PromptEdited(action) => state.edit_prompt(action),
         Message::SlotArtLoaded { appid, art } => state.apply_slot_art(appid, art),
-        Message::SettingsOpened => state.open_settings(),
+        Message::SettingsOpened => return state.open_settings(),
+        Message::ImageSourceSelected(source) => {
+            if let Some(form) = state.settings.as_mut() {
+                form.image_source = source;
+            }
+        }
+        Message::CodexChecked(status) => {
+            if let Some(form) = state.settings.as_mut() {
+                form.codex = status;
+            }
+        }
         Message::SettingsClosed => state.settings = None,
         Message::SettingsChanged(field, value) => {
             if let Some(form) = state.settings.as_mut() {
@@ -734,24 +781,40 @@ async fn request_sgdb(
     Ok(images)
 }
 
+/// Where Generate and Modify get their images.
+enum ImageBackend {
+    Api {
+        key: String,
+        model: String,
+        base: String,
+    },
+    Codex(CodexClient),
+}
+
+async fn check_codex(runner: Arc<dyn CodexRunner>) -> CodexStatus {
+    crate::codex::check(runner.as_ref()).await
+}
+
 async fn request_generate(
-    key: String,
-    model: String,
-    base: String,
+    backend: ImageBackend,
     prompt: String,
     kind: AssetKind,
 ) -> Result<Vec<DynamicImage>, String> {
-    OpenAiClient::new(&key, &model, &base)
-        .generate(&prompt, kind)
-        .await
-        .map_err(|err| err.to_string())
+    match backend {
+        ImageBackend::Api { key, model, base } => OpenAiClient::new(&key, &model, &base)
+            .generate(&prompt, kind)
+            .await
+            .map_err(|err| err.to_string()),
+        ImageBackend::Codex(client) => client
+            .generate(&prompt, kind)
+            .await
+            .map_err(|err| err.to_string()),
+    }
 }
 
 /// Everything the Modify request reads.
 struct ModifyRequest {
-    key: String,
-    model: String,
-    base: String,
+    backend: ImageBackend,
     cdn_base: String,
     cache_dir: PathBuf,
     custom: Option<PathBuf>,
@@ -762,10 +825,16 @@ struct ModifyRequest {
 
 async fn request_modify(request: ModifyRequest) -> Result<Vec<DynamicImage>, String> {
     let source = current_image(&request).await?;
-    OpenAiClient::new(&request.key, &request.model, &request.base)
-        .modify(&source, &request.prompt, request.kind)
-        .await
-        .map_err(|err| err.to_string())
+    match &request.backend {
+        ImageBackend::Api { key, model, base } => OpenAiClient::new(key, model, base)
+            .modify(&source, &request.prompt, request.kind)
+            .await
+            .map_err(|err| err.to_string()),
+        ImageBackend::Codex(client) => client
+            .modify(&source, &request.prompt, request.kind)
+            .await
+            .map_err(|err| err.to_string()),
+    }
 }
 
 /// The image Modify starts from: the custom art, else Steam's own art.
@@ -863,6 +932,8 @@ mod tests {
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    use crate::codex::{BoxFuture, CodexRunner, CodexStatus, RunOutput};
+    use crate::config::ImageSource;
     use crate::secrets::{KeyStore, SecretsError};
     use crate::steam::library::EntrySource;
     use crate::steam::paths::Os;
@@ -916,6 +987,51 @@ mod tests {
         }
     }
 
+    /// A Codex that is installed and saves one PNG of `size` per run.
+    struct FakeCodex {
+        home: PathBuf,
+        size: (u32, u32),
+        runs: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CodexRunner for FakeCodex {
+        fn version(&self) -> BoxFuture<'_, Option<String>> {
+            Box::pin(async { Some("codex-cli 0.167.0".to_string()) })
+        }
+        fn exec(
+            &self,
+            _args: Vec<std::ffi::OsString>,
+        ) -> BoxFuture<'_, std::io::Result<RunOutput>> {
+            let run = self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let folder = self.home.join(format!("generated_images/t{run}"));
+            let (width, height) = self.size;
+            Box::pin(async move {
+                fs::create_dir_all(&folder).unwrap();
+                fs::write(folder.join("ig.png"), png_bytes(width, height)).unwrap();
+                Ok(RunOutput {
+                    success: true,
+                    stdout: format!("{{\"type\":\"thread.started\",\"thread_id\":\"t{run}\"}}"),
+                    stderr: String::new(),
+                })
+            })
+        }
+    }
+
+    /// No Codex on the `PATH`.
+    struct NoCodex;
+
+    impl CodexRunner for NoCodex {
+        fn version(&self) -> BoxFuture<'_, Option<String>> {
+            Box::pin(async { None })
+        }
+        fn exec(
+            &self,
+            _args: Vec<std::ffi::OsString>,
+        ) -> BoxFuture<'_, std::io::Result<RunOutput>> {
+            Box::pin(async { Err(std::io::Error::from(std::io::ErrorKind::NotFound)) })
+        }
+    }
+
     /// Services with a fake key store, no environment keys and no server.
     fn services(keys: &[(Service, &str)]) -> Services {
         let store = FakeStore::default();
@@ -935,6 +1051,8 @@ mod tests {
             sgdb_base: "http://127.0.0.1:1".to_string(),
             openai_base: "http://127.0.0.1:1".to_string(),
             steam_cdn_base: "http://127.0.0.1:1".to_string(),
+            codex: Arc::new(NoCodex),
+            codex_home: None,
         }
     }
 
@@ -986,6 +1104,7 @@ mod tests {
         Config {
             steam_root: Some(steam_root.to_path_buf()),
             openai_model: crate::config::DEFAULT_OPENAI_MODEL.to_string(),
+            ..Config::default()
         }
         .save(&path)
         .unwrap();
@@ -1869,6 +1988,115 @@ mod tests {
     }
 
     #[test]
+    fn codex_generate_needs_no_openai_key() {
+        let mut state = state_with(
+            services(&[]),
+            Some(PathBuf::from("/nonexistent-steam")),
+            vec![steam_entry(440, "Team Fortress 2")],
+        );
+        state.config.image_source = ImageSource::Codex;
+        send(&mut state, Message::EntrySelected(440));
+        send(
+            &mut state,
+            Message::SlotAction(AssetKind::Hero, PanelTab::Generate),
+        );
+        send(&mut state, Message::ActionPressed);
+
+        assert!(state.busy());
+        let status = state.status().expect("a status line");
+        assert!(!status.is_error(), "{}", status.text());
+        assert!(status.text().contains("Codex"), "{}", status.text());
+    }
+
+    #[test]
+    fn codex_modify_needs_no_openai_key() {
+        let mut state = state_with_art(
+            Some(PathBuf::from("/steam")),
+            vec![(AssetKind::Portrait, SlotArt::Default(pixel()))],
+        );
+        state.config.image_source = ImageSource::Codex;
+        send(
+            &mut state,
+            Message::SlotAction(AssetKind::Portrait, PanelTab::Modify),
+        );
+        send(&mut state, Message::ActionPressed);
+        assert!(state.busy());
+        assert!(!state.status().is_some_and(Status::is_error));
+    }
+
+    #[tokio::test]
+    async fn codex_generate_returns_prepared_images() {
+        let home = TempDir::new().unwrap();
+        let codex = CodexClient::new(
+            Arc::new(FakeCodex {
+                home: home.path().to_path_buf(),
+                size: (2172, 724),
+                runs: Default::default(),
+            }),
+            Some(home.path().to_path_buf()),
+        );
+        let images = request_generate(ImageBackend::Codex(codex), "castle".into(), AssetKind::Hero)
+            .await
+            .unwrap();
+        assert_eq!(images.len(), usize::from(CANDIDATE_COUNT));
+        assert_eq!((images[0].width(), images[0].height()), (1920, 620));
+    }
+
+    #[tokio::test]
+    async fn codex_failure_becomes_the_status_text() {
+        let codex = CodexClient::new(Arc::new(NoCodex), None);
+        let err = request_generate(ImageBackend::Codex(codex), "x".into(), AssetKind::Logo)
+            .await
+            .unwrap_err();
+        assert!(err.contains("Codex is not installed"), "{err}");
+    }
+
+    #[test]
+    fn settings_open_checks_for_codex() {
+        let mut state = State::new(services(&[]));
+        send(&mut state, Message::SettingsOpened);
+        assert_eq!(state.settings().unwrap().codex, CodexStatus::Checking);
+        send(
+            &mut state,
+            Message::CodexChecked(CodexStatus::Found("codex-cli 0.167.0".to_string())),
+        );
+        assert_eq!(
+            state.settings().unwrap().codex,
+            CodexStatus::Found("codex-cli 0.167.0".to_string())
+        );
+    }
+
+    #[test]
+    fn late_codex_check_without_a_dialog_is_dropped() {
+        let mut state = State::new(services(&[]));
+        send(&mut state, Message::CodexChecked(CodexStatus::NotFound));
+        assert!(state.settings().is_none());
+    }
+
+    #[tokio::test]
+    async fn codex_check_reads_the_runner() {
+        assert_eq!(check_codex(Arc::new(NoCodex)).await, CodexStatus::NotFound);
+    }
+
+    #[test]
+    fn settings_save_writes_the_image_source() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let mut services = services(&[]);
+        services.config_path = Some(config_path.clone());
+        let mut state = State::new(services);
+
+        send(&mut state, Message::SettingsOpened);
+        send(&mut state, Message::ImageSourceSelected(ImageSource::Codex));
+        assert_eq!(state.settings().unwrap().image_source, ImageSource::Codex);
+        send(&mut state, Message::SettingsSaved);
+        assert_eq!(
+            Config::load(&config_path).unwrap().image_source,
+            ImageSource::Codex
+        );
+    }
+
+    #[test]
     fn prompt_editor_updates_the_prompt() {
         use iced::widget::text_editor::{Action, Edit};
 
@@ -1953,6 +2181,7 @@ mod tests {
             Config {
                 steam_root: Some(PathBuf::from("/games/Steam")),
                 openai_model: "gpt-image-2.6-flare".to_string(),
+                ..Config::default()
             }
         );
         // The library loads again with the saved settings.

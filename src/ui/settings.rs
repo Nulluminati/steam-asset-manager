@@ -1,15 +1,16 @@
-//! The settings dialog: the API keys, the Steam folder override and the
-//! OpenAI model.
+//! The settings dialog: the API keys, the Steam folder override, the image
+//! source and the OpenAI model.
 
 use std::path::PathBuf;
 
 use iced::widget::{
-    button, center, column, container, mouse_area, opaque, row, space, text, text_input,
+    button, center, column, container, mouse_area, opaque, radio, row, space, text, text_input,
 };
-use iced::{Color, Element, Length};
+use iced::{Alignment, Color, Element, Length};
 
 use crate::app::{Message, State};
-use crate::config::{Config, DEFAULT_OPENAI_MODEL};
+use crate::codex::{CodexStatus, INSTALL_STEPS};
+use crate::config::{Config, DEFAULT_OPENAI_MODEL, ImageSource};
 use crate::secrets::{Secrets, Service};
 
 /// One input of the settings dialog.
@@ -35,6 +36,9 @@ pub struct SettingsForm {
     keys: Vec<KeyInput>,
     steam_root: String,
     model: String,
+    pub image_source: ImageSource,
+    /// Whether the dialog found the Codex program.
+    pub codex: CodexStatus,
     /// The reason the last save failed.
     pub error: Option<String>,
 }
@@ -61,6 +65,8 @@ impl SettingsForm {
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
             model: config.openai_model.clone(),
+            image_source: config.image_source,
+            codex: CodexStatus::Checking,
             error: None,
         }
     }
@@ -114,6 +120,7 @@ impl SettingsForm {
             } else {
                 model.to_string()
             },
+            image_source: self.image_source,
         }
     }
 }
@@ -124,6 +131,28 @@ pub fn key_label(service: Service) -> &'static str {
         Service::SteamGridDb => "SteamGridDB API key",
         Service::OpenAi => "OpenAI API key",
         Service::SteamWeb => "Steam Web API key",
+    }
+}
+
+/// The line next to the Codex option: found with its version, or not.
+pub fn codex_note(status: &CodexStatus) -> String {
+    match status {
+        CodexStatus::Checking => "Looking for Codex...".to_string(),
+        CodexStatus::Found(version) => format!("Found: {version}"),
+        CodexStatus::NotFound => "Not found on the PATH.".to_string(),
+    }
+}
+
+/// The install steps, when the dialog did not find Codex.
+pub fn install_steps(status: &CodexStatus) -> Option<[&'static str; 3]> {
+    (*status == CodexStatus::NotFound).then_some(INSTALL_STEPS)
+}
+
+/// The note under the model input when the model does not apply.
+pub fn model_note(source: ImageSource) -> Option<&'static str> {
+    match source {
+        ImageSource::OpenAiApi => None,
+        ImageSource::Codex => Some("Codex picks the image model, so this setting does not apply."),
     }
 }
 
@@ -156,12 +185,45 @@ pub fn view<'a>(state: &'a State, form: &'a SettingsForm) -> Element<'a, Message
             .padding(8)
             .on_input(|value| Message::SettingsChanged(SettingsField::SteamRoot, value)),
     );
+    fields = fields.push(text("Image source").size(14));
+    let source_option = |source: ImageSource| {
+        radio(
+            source.label(),
+            source,
+            Some(form.image_source),
+            Message::ImageSourceSelected,
+        )
+        .size(16)
+        .text_size(14)
+    };
+    fields = fields.push(source_option(ImageSource::OpenAiApi));
+    fields = fields.push(
+        row![
+            source_option(ImageSource::Codex),
+            text(codex_note(&form.codex))
+                .size(12)
+                .style(text::secondary),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center),
+    );
+    if let Some(steps) = install_steps(&form.codex) {
+        let mut list = column![text("Install Codex:").size(12)].spacing(2);
+        for (number, step) in steps.iter().enumerate() {
+            list = list.push(text(format!("{}. {step}", number + 1)).size(12));
+        }
+        fields = fields.push(list);
+    }
+
     fields = fields.push(text("OpenAI model").size(14));
     fields = fields.push(
         text_input(DEFAULT_OPENAI_MODEL, form.value(SettingsField::Model))
             .padding(8)
             .on_input(|value| Message::SettingsChanged(SettingsField::Model, value)),
     );
+    if let Some(note) = model_note(form.image_source) {
+        fields = fields.push(text(note).size(12).style(text::secondary));
+    }
     if let Some(error) = &form.error {
         fields = fields.push(text(error).size(13).style(text::danger));
     }
@@ -253,6 +315,7 @@ mod tests {
         let config = Config {
             steam_root: Some(PathBuf::from("/games/Steam")),
             openai_model: "gpt-image-2".to_string(),
+            ..Config::default()
         };
         let form = SettingsForm::new(&secrets(&[(Service::OpenAi, "sk-1")]), &config);
         assert_eq!(form.value(SettingsField::Key(Service::OpenAi)), "sk-1");
@@ -300,6 +363,7 @@ mod tests {
             Config {
                 steam_root: Some(PathBuf::from("/games/Steam")),
                 openai_model: "gpt-image-2.6-flare".to_string(),
+                ..Config::default()
             }
         );
     }
@@ -309,12 +373,58 @@ mod tests {
         let config = Config {
             steam_root: Some(PathBuf::from("/games/Steam")),
             openai_model: "gpt-image-2".to_string(),
+            ..Config::default()
         };
         let mut form = SettingsForm::new(&secrets(&[]), &config);
         form.set(SettingsField::SteamRoot, "  ".to_string());
         form.set(SettingsField::Model, String::new());
         assert_eq!(form.to_config(), Config::default());
         assert_eq!(form.to_config().openai_model, DEFAULT_OPENAI_MODEL);
+    }
+
+    #[test]
+    fn form_opens_with_the_image_source_of_the_config() {
+        let config = Config {
+            image_source: ImageSource::Codex,
+            ..Config::default()
+        };
+        let form = SettingsForm::new(&secrets(&[]), &config);
+        assert_eq!(form.image_source, ImageSource::Codex);
+        assert_eq!(form.codex, CodexStatus::Checking);
+    }
+
+    #[test]
+    fn to_config_keeps_the_picked_image_source() {
+        let mut form = SettingsForm::new(&secrets(&[]), &Config::default());
+        form.image_source = ImageSource::Codex;
+        assert_eq!(form.to_config().image_source, ImageSource::Codex);
+    }
+
+    #[test]
+    fn codex_note_shows_the_version_or_not_found() {
+        assert_eq!(
+            codex_note(&CodexStatus::Found("codex-cli 0.167.0".to_string())),
+            "Found: codex-cli 0.167.0"
+        );
+        assert_eq!(codex_note(&CodexStatus::NotFound), "Not found on the PATH.");
+        assert_eq!(codex_note(&CodexStatus::Checking), "Looking for Codex...");
+    }
+
+    #[test]
+    fn install_steps_show_only_when_codex_is_not_found() {
+        let steps = install_steps(&CodexStatus::NotFound).expect("install steps");
+        assert!(steps[0].contains("winget install OpenJS.NodeJS.LTS"));
+        assert!(steps[1].contains("npm install -g @openai/codex"));
+        assert!(steps[2].contains("codex login"));
+        assert!(install_steps(&CodexStatus::Checking).is_none());
+        assert!(install_steps(&CodexStatus::Found("v".to_string())).is_none());
+    }
+
+    #[test]
+    fn model_note_shows_only_for_codex() {
+        assert!(model_note(ImageSource::OpenAiApi).is_none());
+        let note = model_note(ImageSource::Codex).unwrap();
+        assert!(note.contains("Codex picks the image model"), "{note}");
     }
 
     #[test]

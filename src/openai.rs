@@ -52,7 +52,7 @@ fn size_param(kind: AssetKind) -> String {
 }
 
 /// Extra words that tell the model what the slot needs.
-fn kind_hint(kind: AssetKind) -> &'static str {
+pub(crate) fn kind_hint(kind: AssetKind) -> &'static str {
     match kind {
         AssetKind::Portrait => "Vertical game cover art, 2:3 portrait, the game title on the art.",
         AssetKind::Wide => "Wide game banner art, the game title on the art.",

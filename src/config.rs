@@ -27,6 +27,30 @@ pub enum ConfigError {
     Serialize(#[from] toml::ser::Error),
 }
 
+/// Where Generate and Modify get their images.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageSource {
+    /// The OpenAI image API, paid with the OpenAI API key.
+    #[default]
+    #[serde(rename = "openai_api")]
+    OpenAiApi,
+    /// The Codex CLI on the user's ChatGPT plan.
+    Codex,
+}
+
+impl ImageSource {
+    pub const ALL: [ImageSource; 2] = [ImageSource::OpenAiApi, ImageSource::Codex];
+
+    /// The name the settings dialog shows.
+    pub fn label(self) -> &'static str {
+        match self {
+            ImageSource::OpenAiApi => "OpenAI API",
+            ImageSource::Codex => "Codex (ChatGPT plan)",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -34,6 +58,7 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub steam_root: Option<PathBuf>,
     pub openai_model: String,
+    pub image_source: ImageSource,
 }
 
 impl Default for Config {
@@ -41,6 +66,7 @@ impl Default for Config {
         Config {
             steam_root: None,
             openai_model: DEFAULT_OPENAI_MODEL.to_string(),
+            image_source: ImageSource::default(),
         }
     }
 }
@@ -115,6 +141,7 @@ mod tests {
         let config = Config {
             steam_root: Some(PathBuf::from("/games/Steam")),
             openai_model: "gpt-image-test".to_string(),
+            image_source: ImageSource::Codex,
         };
         config.save(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), config);
@@ -146,6 +173,47 @@ mod tests {
         let config = Config::load(&path).unwrap();
         assert_eq!(config.steam_root, Some(PathBuf::from("/games/Steam")));
         assert_eq!(config.openai_model, DEFAULT_OPENAI_MODEL);
+    }
+
+    #[test]
+    fn image_source_defaults_to_the_openai_api() {
+        assert_eq!(Config::default().image_source, ImageSource::OpenAiApi);
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        fs::write(&path, "openai_model = \"gpt-image-2\"\n").unwrap();
+        assert_eq!(
+            Config::load(&path).unwrap().image_source,
+            ImageSource::OpenAiApi
+        );
+    }
+
+    #[test]
+    fn image_source_codex_is_saved_as_codex() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let config = Config {
+            image_source: ImageSource::Codex,
+            ..Config::default()
+        };
+        config.save(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("image_source = \"codex\""), "{text}");
+        assert_eq!(Config::load(&path).unwrap(), config);
+    }
+
+    #[test]
+    fn image_source_api_is_saved_as_openai_api() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        Config::default().save(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("image_source = \"openai_api\""), "{text}");
+    }
+
+    #[test]
+    fn image_source_labels() {
+        assert_eq!(ImageSource::OpenAiApi.label(), "OpenAI API");
+        assert_eq!(ImageSource::Codex.label(), "Codex (ChatGPT plan)");
     }
 
     #[test]

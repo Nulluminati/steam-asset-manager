@@ -44,7 +44,11 @@ The approved UI layout is `docs/mockup-main-screen.png`.
   `Message::SlotArtLoaded`; a reply for another entry is dropped. Apply
   puts the written image in its slot. Modify needs art in the target slot.
   `Message::SettingsSaved` writes only the changed keys, saves the config,
-  then reloads the library; a failure keeps the dialog open. `view` calls
+  then reloads the library; a failure keeps the dialog open. Opening the
+  settings starts a `Task` that looks for Codex (`Message::CodexChecked`).
+  Generate and Modify use the `ImageBackend` of `Config::image_source`:
+  the OpenAI API (needs the key) or Codex (`Services::codex`,
+  `Services::codex_home`). `view` calls
   `ui::view`.
 - `src/ui/`: the iced views. `mod.rs` holds `theme` (dark, steel blue
   accent), `window_icon` (decodes `assets/icon.png`) and `view` (library, detail and panel in a row; the settings
@@ -54,7 +58,8 @@ The approved UI layout is `docs/mockup-main-screen.png`.
   (tabs, `TargetOption` dropdown, prompt `text_editor`, action button,
   2x2 candidates; `modify_enabled`, `action_label`), `settings.rs`
   (`SettingsForm`: key inputs prefilled from `Secrets::get_key`,
-  `changed_keys`, `to_config`). Keep view code thin and unit-test the
+  `changed_keys`, `to_config`, the image source radio buttons; `codex_note`,
+  `install_steps`, `model_note`). Keep view code thin and unit-test the
   helpers that decide what a view shows.
 - `src/assets.rs`: `AssetKind`.
 - `src/steam/`: `paths.rs`, `users.rs`, `library.rs`, `owned.rs`,
@@ -62,8 +67,9 @@ The approved UI layout is `docs/mockup-main-screen.png`.
   and the shared text VDF helpers (keys match without regard to case).
 - `src/imaging.rs`: crop and resize. `prepare(image, kind)` gives the
   exact Steam size, or trims a logo's transparent borders.
-- `src/config.rs`: `Config` (`steam_root`, `openai_model`) as TOML at
-  `config::default_path()`. A missing file or field gives the default.
+- `src/config.rs`: `Config` (`steam_root`, `openai_model`, `image_source`)
+  as TOML at `config::default_path()`. A missing file or field gives the
+  default. `ImageSource` is `OpenAiApi` (default) or `Codex`.
 - `src/secrets.rs`: API keys. `Secrets::get_key(Service)` reads the env
   var, then the `KeyStore`. `Secrets::system()` uses the OS keyring
   (service `steam-asset-manager`); tests pass a fake store and env lookup.
@@ -80,6 +86,14 @@ The approved UI layout is `docs/mockup-main-screen.png`.
   HTTP 401 to `BadKey`, other failures to `Api` with OpenAI's message or
   the raw body, and bad result data to `Decode`, `Image` or
   `MissingImage`.
+- `src/codex.rs`: Codex CLI image source. `CodexRunner` (trait, like
+  `KeyStore`) runs `codex`; `SystemCodex` finds it on the `PATH`
+  (`codex.cmd` or `codex.exe` on Windows, started with `CREATE_NO_WINDOW`).
+  `CodexClient::generate` and `modify` start four runs at the same time in
+  a temp work folder, with `instruction` (one line), `exec_args`,
+  `parse_events` and `saved_image`, then run `imaging::prepare`. One
+  failed run does not hide the others. `check` gives a `CodexStatus` for
+  the settings dialog. `paths::codex_home` is the one Codex home lookup.
 - `tests/fixtures/steam/`: a fake Steam root for tests. Account ID
   `39734273` is the most recent user and owns the `shortcuts.vdf` fixture.
   `appcache/librarycache/` holds app 440 in the flat layout and app 620 in
@@ -145,6 +159,27 @@ Correct this list when a fact turns out to be wrong.
 - Both endpoints take `model`, `prompt`, `n` (1 to 10), `size`,
   `background` and `output_format`; the edits reference page lists them.
   The edits endpoint also needs at least one `image` file part.
+
+## Codex facts
+
+Proven with codex-cli 0.167.0 on Linux on 2026-11-10 (herdboard card
+`tign`). Correct this list when a fact turns out to be wrong.
+
+- Command: `codex exec --json --skip-git-repo-check --ephemeral -s read-only
+  -C <dir> [-i <image>] -- "<instruction>"`, stdin closed (else Codex
+  waits for input). `-i` takes every value after it, so `--` ends it.
+- Events are JSON lines: `thread.started` (`thread_id`), `item.completed`
+  with an `agent_message` item (`text`), `error` (`message`) and
+  `turn.failed` (`error.message`).
+- Codex saves the image in `<codex home>/generated_images/<thread_id>/`.
+  Codex home is `CODEX_HOME`, else `~/.codex`. The app takes the newest
+  PNG there and deletes it; the fallback is a PNG path in the last agent
+  message.
+- A hero run gave 2172x724 (3:1) in about 36 s. Each run uses 77k to 155k
+  input tokens of the plan, because Codex loads the user's AGENTS.md and
+  skills.
+- Not tested yet: portrait and wide shapes, Modify with `-i`, Windows
+  (`codex.cmd`, sandbox set-up, openai/codex#45871).
 
 ## Dependency notes
 

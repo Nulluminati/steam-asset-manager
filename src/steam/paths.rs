@@ -1,5 +1,6 @@
 //! Every OS-specific Steam path lives in this module.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +96,15 @@ pub fn find_steam_root(env: &dyn PathEnv, override_path: Option<&Path>) -> Optio
         return Some(path.to_path_buf());
     }
     root_candidates(env).into_iter().find(|path| path.is_dir())
+}
+
+/// The Codex CLI home folder: `CODEX_HOME` when set, else `.codex` in the
+/// user's home folder (on Windows, `%USERPROFILE%\\.codex`).
+pub fn codex_home(codex_home_var: Option<OsString>, home: Option<PathBuf>) -> Option<PathBuf> {
+    match codex_home_var {
+        Some(var) if !var.is_empty() => Some(PathBuf::from(var)),
+        _ => home.map(|home| home.join(".codex")),
+    }
 }
 
 #[cfg(test)]
@@ -313,5 +323,30 @@ mod tests {
         let env = FakeEnv::new(Os::Linux, home.path());
         let missing = home.path().join("missing");
         assert_eq!(find_steam_root(&env, Some(&missing)), Some(local));
+    }
+
+    #[test]
+    fn codex_home_prefers_the_environment_variable() {
+        assert_eq!(
+            codex_home(
+                Some(OsString::from("/opt/codex")),
+                Some(PathBuf::from("/home/zero"))
+            ),
+            Some(PathBuf::from("/opt/codex"))
+        );
+    }
+
+    #[test]
+    fn codex_home_defaults_to_dot_codex_in_the_home_folder() {
+        let home = PathBuf::from("/home/zero");
+        assert_eq!(
+            codex_home(None, Some(home.clone())),
+            Some(home.join(".codex"))
+        );
+        assert_eq!(
+            codex_home(Some(OsString::new()), Some(home.clone())),
+            Some(home.join(".codex"))
+        );
+        assert_eq!(codex_home(None, None), None);
     }
 }

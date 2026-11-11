@@ -15,11 +15,12 @@
 - **Icons are out of scope.** Manage portrait, wide, hero and logo only.
 - **Account: most recent user only.** Read `config/loginusers.vdf` and use the account with `MostRecent "1"`, else the account with the newest `Timestamp`. No account switcher.
 - **OpenAI model: `gpt-image-2.6-sunburst` by default; the user can change it in the config.** OpenAI's models page (https://developers.openai.com/api/docs/models, read 2026-11-07) lists `gpt-image-2`, `gpt-image-2.5-sunburst`, `gpt-image-2.5-flare`, `gpt-image-2.6-sunburst` and `gpt-image-2.6-flare`. Sunburst is for "detailed visual work" and Flare is for "fast iteration". Library art is a one-time job, so the default picks quality: `gpt-image-2.6-sunburst`. The image guide (https://developers.openai.com/api/docs/guides/image-generation, read 2026-11-07) gives the custom size rules: width and height as multiples of 16, an aspect ratio between 1:3 and 3:1, no edge above 3840, and 655,360 to 8,294,400 total pixels. No exact Steam size passes those rules, so the client requests a custom size per kind and then center-crops.
+- **Image source: the OpenAI API or Codex (ChatGPT plan).** Settings has an "Image source" choice, saved as `image_source` in the config (`openai_api` by default, or `codex`). With Codex, Generate and Modify run the Codex CLI (`codex exec`) on the user's ChatGPT plan, so they need no OpenAI API key and cost no API money. Codex picks the image model, so the model setting does not apply. Codex's `--json` events and its `generated_images` folder have no public contract; see "Codex facts" in `AGENTS.md`.
 - **UI: the approved mockup `docs/mockup-main-screen.png`.** Dark theme, steel blue accent. Left: searchable library list; only a non-Steam shortcut gets a "Non-Steam" tag (this differs from the mockup, which tags every entry). Center: game title, then the four slots laid out like the Steam library page (hero on top, portrait and wide capsule side by side, logo below). Each slot shows its target size and three buttons: SteamGridDB, Generate, Modify. Right: a panel with a segmented control `SteamGridDB | Generate | Modify`, a Target dropdown, a prompt box (Generate and Modify tabs), a primary action button and a 2x2 grid of candidates, each with an Apply button. A slot button selects that slot as the target (highlighted border) and opens the matching tab.
 - **Name:** crate and binary `steam-asset-manager`.
 
 ## Crates
-`iced` (latest, features `image` and `tokio`), `tokio`, `reqwest` (features `rustls-tls`, `json`, `multipart`), `serde` (feature `derive`), `serde_json`, `keyvalues-parser` (text VDF), `image`, `keyring`, `directories`, `thiserror`, `anyhow`, `crc32fast`, `toml`, `base64`. Windows only: `winreg`. Dev: `tempfile`, `wiremock`.
+`iced` (latest, features `image` and `tokio`), `tokio`, `reqwest` (features `rustls-tls`, `json`, `multipart`), `serde` (feature `derive`), `serde_json`, `keyvalues-parser` (text VDF), `image`, `keyring`, `directories`, `thiserror`, `anyhow`, `crc32fast`, `toml`, `base64`, `tempfile` (the Codex work folder). Windows only: `winreg`. Dev: `wiremock`.
 
 ## Module map
 - `src/main.rs`: starts the iced app.
@@ -31,6 +32,7 @@
 - `src/config.rs`, `src/secrets.rs`: settings and API keys.
 - `src/sgdb.rs`: SteamGridDB client.
 - `src/openai.rs`: OpenAI image client.
+- `src/codex.rs`: Codex CLI image source.
 - `tests/fixtures/steam/`: a fake Steam root for tests.
 
 ## Steam facts
@@ -119,6 +121,12 @@ Build the layout of `docs/mockup-main-screen.png`.
   5. Modify the wide capsule. Check that the file is 920x430.
   6. Apply art to a non-Steam shortcut.
   7. Restart Steam. Check that the new art shows in the library.
+- By hand, for the Codex image source (Linux and the Windows PC):
+  1. Open Settings. Check that the Codex option shows `codex --version`, or the install steps when Codex is missing.
+  2. Select "Codex (ChatGPT plan)" and save. Remove the OpenAI key.
+  3. Generate a portrait capsule and a wide capsule. Check the shapes: these ratios are not tested yet.
+  4. Modify a hero. This checks `-i` with the current art.
+  5. On Windows, check that no console window opens and that `codex.cmd` runs.
 
 ## Out of scope
 - Icons.
