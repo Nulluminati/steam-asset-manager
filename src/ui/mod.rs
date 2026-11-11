@@ -6,12 +6,18 @@ pub mod panel;
 pub mod settings;
 
 use iced::widget::{container, row, rule, stack};
-use iced::{Border, Color, Element, Length, Theme, theme};
+use iced::{Border, Color, Element, Length, Theme, theme, window};
 
 use crate::app::{Message, State};
 
 /// The steel blue accent of the approved mockup.
 const ACCENT: Color = Color::from_rgb8(0x46, 0x82, 0xb4);
+
+/// The app icon in the title bar and the taskbar. `None` when the
+/// embedded PNG does not decode.
+pub fn window_icon() -> Option<window::Icon> {
+    window::icon::from_file_data(include_bytes!("../../assets/icon.png"), None).ok()
+}
 
 /// The dark theme with the steel blue accent.
 pub fn theme(_state: &State) -> Theme {
@@ -63,5 +69,15 @@ pub(crate) fn tag_style(theme: &Theme) -> container::Style {
             ..Border::default()
         },
         ..container::Style::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_icon_decodes() {
+        assert!(window_icon().is_some());
     }
 }

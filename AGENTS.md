@@ -21,6 +21,11 @@ The approved UI layout is `docs/mockup-main-screen.png`.
 ## Module map
 
 - `src/main.rs`: starts the iced app.
+- `build.rs`: on Windows, embeds `assets/icon.ico` in the `.exe` with
+  `winresource` (needs the Windows SDK resource compiler, part of the Visual
+  Studio C++ build tools).
+- `assets/`: `icon.png` (256x256, window and taskbar icon) and `icon.ico`
+  (16 to 256 px, Windows executable icon). Codex generated the artwork.
 - `src/lib.rs`: declares the library modules, so tests and `main.rs` share
   them and unused public items do not fail clippy.
 - `src/app.rs`: the iced `State`, `Message`, `update` and `view`, plus
@@ -42,7 +47,7 @@ The approved UI layout is `docs/mockup-main-screen.png`.
   then reloads the library; a failure keeps the dialog open. `view` calls
   `ui::view`.
 - `src/ui/`: the iced views. `mod.rs` holds `theme` (dark, steel blue
-  accent) and `view` (library, detail and panel in a row; the settings
+  accent), `window_icon` (decodes `assets/icon.png`) and `view` (library, detail and panel in a row; the settings
   dialog in a `stack` on top). `library.rs` (search box, rows with
   `tag_text` and `install_note`), `detail.rs` (`SlotArt`, `slot_caption`,
   the four slot frames; a click on a frame sets the target), `panel.rs`

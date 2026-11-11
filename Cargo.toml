@@ -22,6 +22,9 @@ toml = "1.2.1"
 [target."cfg(windows)".dependencies]
 winreg = "0.56.0"
 
+[target."cfg(windows)".build-dependencies]
+winresource = "0.1.34"
+
 [dev-dependencies]
 tempfile = "3.27.0"
 wiremock = "0.6.5"
