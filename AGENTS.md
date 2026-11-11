@@ -56,7 +56,8 @@ The approved UI layout is `docs/mockup-main-screen.png`.
   `tag_text` and `install_note`), `detail.rs` (`SlotArt`, `slot_caption`,
   the four slot frames; a click on a frame sets the target), `panel.rs`
   (tabs, `TargetOption` dropdown, prompt `text_editor`, action button,
-  2x2 candidates; `modify_enabled`, `action_label`), `settings.rs`
+  2x2 candidates; on Modify, the source thumbnail from `modify_source`;
+  `modify_enabled`, `action_label`), `settings.rs`
   (`SettingsForm`: key inputs prefilled from `Secrets::get_key`,
   `changed_keys`, `to_config`, the image source radio buttons; `codex_note`,
   `install_steps`, `model_note`). Keep view code thin and unit-test the

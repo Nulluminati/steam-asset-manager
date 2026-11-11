@@ -3,6 +3,7 @@
 
 use std::fmt;
 
+use iced::widget::image::Handle;
 use iced::widget::{button, column, image, pick_list, row, space, text, text_editor};
 use iced::{ContentFit, Element, Length};
 
@@ -34,6 +35,17 @@ impl fmt::Display for TargetOption {
 /// Modify starts from the current slot image, so it needs one.
 pub fn modify_enabled(art: &SlotArt) -> bool {
     art.handle().is_some()
+}
+
+/// The image a Modify request starts from and its caption, for example
+/// `Modifying: Hero (custom)`. `None` when the slot has no image.
+pub fn modify_source(kind: AssetKind, art: &SlotArt) -> Option<(&Handle, String)> {
+    let (handle, origin) = match art {
+        SlotArt::Custom(handle) => (handle, "custom"),
+        SlotArt::Default(handle) => (handle, "Steam default"),
+        SlotArt::Loading | SlotArt::Empty => return None,
+    };
+    Some((handle, format!("Modifying: {} ({origin})", kind.label())))
 }
 
 /// The text of the primary action button.
@@ -76,6 +88,21 @@ pub fn view(state: &State) -> Element<'_, Message> {
     ]
     .spacing(12);
 
+    if state.tab() == PanelTab::Modify
+        && let Some((handle, caption)) =
+            modify_source(state.target(), state.slot_art(state.target()))
+    {
+        content = content.push(
+            column![
+                image(handle.clone())
+                    .width(Length::Fill)
+                    .height(100)
+                    .content_fit(ContentFit::Contain),
+                text(caption).size(13),
+            ]
+            .spacing(6),
+        );
+    }
     if state.tab() != PanelTab::SteamGridDb {
         content = content.push(
             text_editor(state.prompt_editor())
@@ -173,6 +200,28 @@ mod tests {
     fn modify_is_disabled_without_an_image() {
         assert!(!modify_enabled(&SlotArt::Empty));
         assert!(!modify_enabled(&SlotArt::Loading));
+    }
+
+    #[test]
+    fn modify_source_shows_custom_art() {
+        let source = handle();
+        let art = SlotArt::Custom(source.clone());
+        let (shown, caption) = modify_source(AssetKind::Hero, &art).expect("source");
+        assert_eq!(shown, &source);
+        assert_eq!(caption, "Modifying: Hero (custom)");
+    }
+
+    #[test]
+    fn modify_source_shows_steam_default_art() {
+        let art = SlotArt::Default(handle());
+        let (_, caption) = modify_source(AssetKind::Portrait, &art).expect("source");
+        assert_eq!(caption, "Modifying: Portrait capsule (Steam default)");
+    }
+
+    #[test]
+    fn modify_source_is_absent_without_an_image() {
+        assert!(modify_source(AssetKind::Logo, &SlotArt::Empty).is_none());
+        assert!(modify_source(AssetKind::Logo, &SlotArt::Loading).is_none());
     }
 
     #[test]
