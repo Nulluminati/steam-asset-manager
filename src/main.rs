@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use steam_asset_manager::{app, ui};
 
 fn main() -> iced::Result {

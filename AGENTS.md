@@ -20,7 +20,9 @@ The approved UI layout is `docs/mockup-main-screen.png`.
 
 ## Module map
 
-- `src/main.rs`: starts the iced app.
+- `src/main.rs`: starts the iced app. A Windows release build uses the
+  GUI subsystem, so no console window opens; a debug build keeps the
+  console for panic messages.
 - `build.rs`: on Windows, embeds `assets/icon.ico` in the `.exe` with
   `winresource` (needs the Windows SDK resource compiler, part of the Visual
   Studio C++ build tools).
