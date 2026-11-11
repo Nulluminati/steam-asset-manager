@@ -14,12 +14,6 @@
   <img src="https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-blue" alt="Platforms: Linux and Windows">
 </p>
 
-![Main screen mockup](docs/mockup-main-screen.png)
-
-*This is the design mockup, not a screenshot of the app. The real app has no
-buttons under each slot (the right panel picks the action), and it tags only
-non-Steam shortcuts.*
-
 ## What it does
 
 Steam shows four pieces of art for each game in your library. This app lets
