@@ -48,7 +48,8 @@ The approved UI layout is `docs/mockup-main-screen.png`.
   settings starts a `Task` that looks for Codex (`Message::CodexChecked`).
   Generate and Modify use the `ImageBackend` of `Config::image_source`:
   the OpenAI API (needs the key) or Codex (`Services::codex`,
-  `Services::codex_home`). `view` calls
+  `Services::codex_home`), and ask for `Config::images_per_request`
+  images. SteamGridDB shows up to `MAX_IMAGES_PER_REQUEST`. `view` calls
   `ui::view`.
 - `src/ui/`: the iced views. `mod.rs` holds `theme` (dark, steel blue
   accent), `window_icon` (decodes `assets/icon.png`) and `view` (library, detail and panel in a row; the settings
@@ -59,7 +60,8 @@ The approved UI layout is `docs/mockup-main-screen.png`.
   2x2 candidates; on Modify, the source thumbnail from `modify_source`;
   `modify_enabled`, `action_label`), `settings.rs`
   (`SettingsForm`: key inputs prefilled from `Secrets::get_key`,
-  `changed_keys`, `to_config`, the image source radio buttons; `codex_note`,
+  `changed_keys`, `to_config`, the image source radio buttons, the
+  "Images per request" `pick_list` of `IMAGE_COUNT_OPTIONS`; `codex_note`,
   `install_steps`, `model_note`). Keep view code thin and unit-test the
   helpers that decide what a view shows.
 - `src/assets.rs`: `AssetKind`.
@@ -68,9 +70,11 @@ The approved UI layout is `docs/mockup-main-screen.png`.
   and the shared text VDF helpers (keys match without regard to case).
 - `src/imaging.rs`: crop and resize. `prepare(image, kind)` gives the
   exact Steam size, or trims a logo's transparent borders.
-- `src/config.rs`: `Config` (`steam_root`, `openai_model`, `image_source`)
-  as TOML at `config::default_path()`. A missing file or field gives the
-  default. `ImageSource` is `OpenAiApi` (default) or `Codex`.
+- `src/config.rs`: `Config` (`steam_root`, `openai_model`, `image_source`,
+  `images_per_request`) as TOML at `config::default_path()`. A missing file
+  or field gives the default. `ImageSource` is `OpenAiApi` (default) or
+  `Codex`. `images_per_request` is 1 by default; a stored value outside 1
+  to `MAX_IMAGES_PER_REQUEST` (4) moves to the nearest edge on load.
 - `src/secrets.rs`: API keys. `Secrets::get_key(Service)` reads the env
   var, then the `KeyStore`. `Secrets::system()` uses the OS keyring
   (service `steam-asset-manager`); tests pass a fake store and env lookup.
@@ -79,10 +83,11 @@ The approved UI layout is `docs/mockup-main-screen.png`.
   lists thumbnail and full URLs (a non-Steam entry uses the first name
   search match; HTTP 404 or no match gives an empty list).
   `download(candidate, kind)` fetches without the key and runs `prepare`.
-- `src/openai.rs`: OpenAI image client. `OpenAiClient::generate(prompt, kind)`
-  makes four new images; `modify(&DynamicImage, prompt, kind)` makes four
-  edits in a multipart request. Both ask for a custom size per kind (see
-  "OpenAI facts"), send `n = 4`, and run `imaging::prepare` on each image.
+- `src/openai.rs`: OpenAI image client. `OpenAiClient::generate(prompt, kind,
+  count)` makes new images; `modify(&DynamicImage, prompt, kind, count)`
+  makes edits in a multipart request. Both ask for a custom size per kind
+  (see "OpenAI facts"), send `n = count`, and run `imaging::prepare` on
+  each image.
   A Logo request asks for a transparent background. `OpenAiError` maps
   HTTP 401 to `BadKey`, other failures to `Api` with OpenAI's message or
   the raw body, and bad result data to `Decode`, `Image` or
@@ -90,7 +95,7 @@ The approved UI layout is `docs/mockup-main-screen.png`.
 - `src/codex.rs`: Codex CLI image source. `CodexRunner` (trait, like
   `KeyStore`) runs `codex`; `SystemCodex` finds it on the `PATH`
   (`codex.cmd` or `codex.exe` on Windows, started with `CREATE_NO_WINDOW`).
-  `CodexClient::generate` and `modify` start four runs at the same time in
+  `CodexClient::generate` and `modify` start `count` runs at the same time in
   a temp work folder, with `instruction` (one line), `exec_args`,
   `parse_events` and `saved_image`, then run `imaging::prepare`. One
   failed run does not hide the others. `check` gives a `CodexStatus` for

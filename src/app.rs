@@ -11,8 +11,8 @@ use image::DynamicImage;
 
 use crate::assets::AssetKind;
 use crate::codex::{CodexClient, CodexRunner, CodexStatus, SystemCodex};
-use crate::config::{self, Config, ImageSource};
-use crate::openai::{CANDIDATE_COUNT, OpenAiClient};
+use crate::config::{self, Config, ImageSource, MAX_IMAGES_PER_REQUEST};
+use crate::openai::OpenAiClient;
 use crate::secrets::{Secrets, Service};
 use crate::sgdb::SgdbClient;
 use crate::steam::defaults::{self, DefaultArt};
@@ -150,6 +150,8 @@ pub enum Message {
     SettingsChanged(SettingsField, String),
     /// The image source option of the settings dialog.
     ImageSourceSelected(ImageSource),
+    /// The images per request option of the settings dialog.
+    ImagesPerRequestSelected(u8),
     /// The settings dialog finished looking for Codex.
     CodexChecked(CodexStatus),
     SettingsSaved,
@@ -450,9 +452,11 @@ impl State {
     fn begin_request_with(&mut self, backend: &ImageBackend) {
         self.begin_request();
         if let ImageBackend::Codex(_) = backend {
-            self.status = Some(Status::Info(
-                "Codex makes four images. This can take several minutes.".to_string(),
-            ));
+            let count = self.config.images_per_request;
+            let noun = if count == 1 { "image" } else { "images" };
+            self.status = Some(Status::Info(format!(
+                "Codex makes {count} {noun}. This can take several minutes."
+            )));
         }
     }
 
@@ -591,7 +595,12 @@ impl State {
                 };
                 self.begin_request_with(&backend);
                 Task::perform(
-                    request_generate(backend, self.prompt.clone(), kind),
+                    request_generate(
+                        backend,
+                        self.prompt.clone(),
+                        kind,
+                        self.config.images_per_request,
+                    ),
                     move |result| Message::CandidatesArrived {
                         appid,
                         kind,
@@ -641,6 +650,7 @@ impl State {
             cache_dir: defaults::library_cache_dir(&root),
             custom: grid::current_custom(&grid::grid_dir(&root, account_id), entry.appid, kind),
             kind,
+            count: self.config.images_per_request,
             prompt: self.prompt.clone(),
             entry,
         })
@@ -661,6 +671,11 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::ImageSourceSelected(source) => {
             if let Some(form) = state.settings.as_mut() {
                 form.image_source = source;
+            }
+        }
+        Message::ImagesPerRequestSelected(count) => {
+            if let Some(form) = state.settings.as_mut() {
+                form.images_per_request = count;
             }
         }
         Message::CodexChecked(status) => {
@@ -766,7 +781,7 @@ async fn request_sgdb(
         .await
         .map_err(|err| err.to_string())?;
     let mut images = Vec::new();
-    for candidate in found.iter().take(usize::from(CANDIDATE_COUNT)) {
+    for candidate in found.iter().take(usize::from(MAX_IMAGES_PER_REQUEST)) {
         // One missing or broken image must not hide the other candidates.
         if let Ok(image) = client.download(candidate, kind).await {
             images.push(image);
@@ -793,14 +808,15 @@ async fn request_generate(
     backend: ImageBackend,
     prompt: String,
     kind: AssetKind,
+    count: u8,
 ) -> Result<Vec<DynamicImage>, String> {
     match backend {
         ImageBackend::Api { key, model, base } => OpenAiClient::new(&key, &model, &base)
-            .generate(&prompt, kind)
+            .generate(&prompt, kind, count)
             .await
             .map_err(|err| err.to_string()),
         ImageBackend::Codex(client) => client
-            .generate(&prompt, kind)
+            .generate(&prompt, kind, count)
             .await
             .map_err(|err| err.to_string()),
     }
@@ -813,6 +829,8 @@ struct ModifyRequest {
     cache_dir: PathBuf,
     custom: Option<PathBuf>,
     kind: AssetKind,
+    /// How many images to ask for.
+    count: u8,
     prompt: String,
     entry: LibraryEntry,
 }
@@ -821,11 +839,11 @@ async fn request_modify(request: ModifyRequest) -> Result<Vec<DynamicImage>, Str
     let source = current_image(&request).await?;
     match &request.backend {
         ImageBackend::Api { key, model, base } => OpenAiClient::new(key, model, base)
-            .modify(&source, &request.prompt, request.kind)
+            .modify(&source, &request.prompt, request.kind, request.count)
             .await
             .map_err(|err| err.to_string()),
         ImageBackend::Codex(client) => client
-            .modify(&source, &request.prompt, request.kind)
+            .modify(&source, &request.prompt, request.kind, request.count)
             .await
             .map_err(|err| err.to_string()),
     }
@@ -1948,6 +1966,24 @@ mod tests {
     }
 
     #[test]
+    fn codex_status_names_the_image_count() {
+        for (count, expected) in [(1, "Codex makes 1 image."), (3, "Codex makes 3 images.")] {
+            let mut state = state_with(
+                services(&[]),
+                Some(PathBuf::from("/nonexistent-steam")),
+                vec![steam_entry(440, "Team Fortress 2")],
+            );
+            state.config.image_source = ImageSource::Codex;
+            state.config.images_per_request = count;
+            send(&mut state, Message::EntrySelected(440));
+            pick(&mut state, AssetKind::Hero, PanelTab::Generate);
+            send(&mut state, Message::ActionPressed);
+            let text = state.status().expect("a status line").text();
+            assert!(text.starts_with(expected), "{text}");
+        }
+    }
+
+    #[test]
     fn codex_modify_needs_no_openai_key() {
         let mut state = state_with_art(
             Some(PathBuf::from("/steam")),
@@ -1971,17 +2007,22 @@ mod tests {
             }),
             Some(home.path().to_path_buf()),
         );
-        let images = request_generate(ImageBackend::Codex(codex), "castle".into(), AssetKind::Hero)
-            .await
-            .unwrap();
-        assert_eq!(images.len(), usize::from(CANDIDATE_COUNT));
+        let images = request_generate(
+            ImageBackend::Codex(codex),
+            "castle".into(),
+            AssetKind::Hero,
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(images.len(), 2);
         assert_eq!((images[0].width(), images[0].height()), (1920, 620));
     }
 
     #[tokio::test]
     async fn codex_failure_becomes_the_status_text() {
         let codex = CodexClient::new(Arc::new(NoCodex), None);
-        let err = request_generate(ImageBackend::Codex(codex), "x".into(), AssetKind::Logo)
+        let err = request_generate(ImageBackend::Codex(codex), "x".into(), AssetKind::Logo, 1)
             .await
             .unwrap_err();
         assert!(err.contains("Codex is not installed"), "{err}");
@@ -2030,6 +2071,21 @@ mod tests {
             Config::load(&config_path).unwrap().image_source,
             ImageSource::Codex
         );
+    }
+
+    #[test]
+    fn settings_save_writes_the_images_per_request() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let mut services = services(&[]);
+        services.config_path = Some(config_path.clone());
+        let mut state = State::new(services);
+
+        send(&mut state, Message::SettingsOpened);
+        send(&mut state, Message::ImagesPerRequestSelected(3));
+        assert_eq!(state.settings().unwrap().images_per_request, 3);
+        send(&mut state, Message::SettingsSaved);
+        assert_eq!(Config::load(&config_path).unwrap().images_per_request, 3);
     }
 
     #[test]

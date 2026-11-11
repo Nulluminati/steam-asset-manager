@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 /// The OpenAI image model the app uses when the config names none.
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-image-2.6-sunburst";
 
+/// The most images one Generate or Modify request makes. The candidate
+/// grid has room for this many.
+pub const MAX_IMAGES_PER_REQUEST: u8 = 4;
+
 const FILE_NAME: &str = "config.toml";
 
 #[derive(Debug, thiserror::Error)]
@@ -59,6 +63,21 @@ pub struct Config {
     pub steam_root: Option<PathBuf>,
     pub openai_model: String,
     pub image_source: ImageSource,
+    /// How many images Generate and Modify make, 1 to
+    /// [`MAX_IMAGES_PER_REQUEST`]. A stored value outside that range moves
+    /// to the nearest edge.
+    #[serde(deserialize_with = "clamped_image_count")]
+    pub images_per_request: u8,
+}
+
+/// Reads any integer and moves it into 1 to [`MAX_IMAGES_PER_REQUEST`].
+fn clamped_image_count<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = i64::deserialize(deserializer)?;
+    let clamped = value.clamp(1, i64::from(MAX_IMAGES_PER_REQUEST));
+    Ok(u8::try_from(clamped).expect("the clamped count fits in u8"))
 }
 
 impl Default for Config {
@@ -67,6 +86,7 @@ impl Default for Config {
             steam_root: None,
             openai_model: DEFAULT_OPENAI_MODEL.to_string(),
             image_source: ImageSource::default(),
+            images_per_request: 1,
         }
     }
 }
@@ -142,6 +162,7 @@ mod tests {
             steam_root: Some(PathBuf::from("/games/Steam")),
             openai_model: "gpt-image-test".to_string(),
             image_source: ImageSource::Codex,
+            images_per_request: 2,
         };
         config.save(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), config);
@@ -214,6 +235,43 @@ mod tests {
     fn image_source_labels() {
         assert_eq!(ImageSource::OpenAiApi.label(), "OpenAI API");
         assert_eq!(ImageSource::Codex.label(), "Codex (ChatGPT plan)");
+    }
+
+    #[test]
+    fn images_per_request_defaults_to_one() {
+        assert_eq!(Config::default().images_per_request, 1);
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        fs::write(&path, "openai_model = \"gpt-image-2\"\n").unwrap();
+        assert_eq!(Config::load(&path).unwrap().images_per_request, 1);
+    }
+
+    #[test]
+    fn images_per_request_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let config = Config {
+            images_per_request: 3,
+            ..Config::default()
+        };
+        config.save(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("images_per_request = 3"), "{text}");
+        assert_eq!(Config::load(&path).unwrap(), config);
+    }
+
+    #[test]
+    fn images_per_request_outside_the_range_is_clamped() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        for (stored, expected) in [("0", 1), ("9", 4), ("-5", 1), ("1000", 4), ("2", 2)] {
+            fs::write(&path, format!("images_per_request = {stored}\n")).unwrap();
+            assert_eq!(
+                Config::load(&path).unwrap().images_per_request,
+                expected,
+                "stored {stored}"
+            );
+        }
     }
 
     #[test]

@@ -14,8 +14,6 @@ use crate::imaging;
 pub const OPENAI_BASE: &str = "https://api.openai.com";
 /// Image calls can take one to two minutes.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
-/// How many images one `generate` or `modify` call asks for.
-pub const CANDIDATE_COUNT: u8 = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum OpenAiError {
@@ -102,16 +100,17 @@ impl OpenAiClient {
         }
     }
 
-    /// Makes four new images from `prompt`, ready to write as `kind`.
+    /// Asks for `count` new images from `prompt`, ready to write as `kind`.
     pub async fn generate(
         &self,
         prompt: &str,
         kind: AssetKind,
+        count: u8,
     ) -> Result<Vec<DynamicImage>, OpenAiError> {
         let mut body = serde_json::json!({
             "model": self.model,
             "prompt": build_prompt(prompt, kind),
-            "n": CANDIDATE_COUNT,
+            "n": count,
             "size": size_param(kind),
             "output_format": "png",
         });
@@ -128,13 +127,14 @@ impl OpenAiClient {
         self.images_from(response, kind).await
     }
 
-    /// Edits `source` with `prompt` and returns four images ready to
+    /// Edits `source` with `prompt` and asks for `count` images ready to
     /// write as `kind`.
     pub async fn modify(
         &self,
         source: &DynamicImage,
         prompt: &str,
         kind: AssetKind,
+        count: u8,
     ) -> Result<Vec<DynamicImage>, OpenAiError> {
         let mut png = Cursor::new(Vec::new());
         source.write_to(&mut png, ImageFormat::Png)?;
@@ -144,7 +144,7 @@ impl OpenAiClient {
         let mut form = reqwest::multipart::Form::new()
             .text("model", self.model.clone())
             .text("prompt", build_prompt(prompt, kind))
-            .text("n", CANDIDATE_COUNT.to_string())
+            .text("n", count.to_string())
             .text("size", size_param(kind))
             .text("output_format", "png")
             .part("image", image_part);
@@ -324,9 +324,7 @@ mod tests {
     }
 
     fn four(size: (u32, u32)) -> Vec<DynamicImage> {
-        (0..CANDIDATE_COUNT)
-            .map(|_| solid(size.0, size.1))
-            .collect()
+        (0..4).map(|_| solid(size.0, size.1)).collect()
     }
 
     #[tokio::test]
@@ -343,7 +341,7 @@ mod tests {
         let client = OpenAiClient::new(KEY, MODEL, &server.uri());
         let source = solid(920, 430);
         let result = client
-            .modify(&source, "make it brighter", AssetKind::Wide)
+            .modify(&source, "make it brighter", AssetKind::Wide, 4)
             .await
             .unwrap();
         assert_eq!(result.len(), 4);
@@ -395,7 +393,7 @@ mod tests {
                 Rgba([0, 0, 0, 0])
             }
         }));
-        let images: Vec<_> = (0..CANDIDATE_COUNT).map(|_| logo.clone()).collect();
+        let images: Vec<_> = (0..4).map(|_| logo.clone()).collect();
         Mock::given(method("POST"))
             .and(path("/v1/images/edits"))
             .respond_with(ResponseTemplate::new(200).set_body_json(images_body(&images)))
@@ -404,7 +402,7 @@ mod tests {
             .await;
         let client = OpenAiClient::new(KEY, MODEL, &server.uri());
         let result = client
-            .modify(&solid(600, 900), "make it brighter", AssetKind::Logo)
+            .modify(&solid(600, 900), "make it brighter", AssetKind::Logo, 4)
             .await
             .unwrap();
         for image in &result {
@@ -438,7 +436,7 @@ mod tests {
             .await;
         let client = OpenAiClient::new("bad-key", MODEL, &server.uri());
         let result = client
-            .generate("a lighthouse at dusk", AssetKind::Hero)
+            .generate("a lighthouse at dusk", AssetKind::Hero, 4)
             .await;
         assert!(
             matches!(result, Err(OpenAiError::BadKey(401))),
@@ -465,7 +463,7 @@ mod tests {
             .await;
         let client = OpenAiClient::new(KEY, MODEL, &server.uri());
         let result = client
-            .generate("a lighthouse at dusk", AssetKind::Hero)
+            .generate("a lighthouse at dusk", AssetKind::Hero, 4)
             .await;
         match result {
             Err(OpenAiError::Api { status, message }) => {
@@ -487,7 +485,7 @@ mod tests {
             .await;
         let client = OpenAiClient::new(KEY, MODEL, &server.uri());
         let result = client
-            .generate("a lighthouse at dusk", AssetKind::Hero)
+            .generate("a lighthouse at dusk", AssetKind::Hero, 4)
             .await;
         match result {
             Err(OpenAiError::Api { status, message }) => {
@@ -517,7 +515,7 @@ mod tests {
             .await;
         let client = OpenAiClient::new(KEY, MODEL, &server.uri());
         let result = client
-            .generate("a lighthouse at dusk", AssetKind::Hero)
+            .generate("a lighthouse at dusk", AssetKind::Hero, 4)
             .await;
         match result {
             Err(OpenAiError::Api { status, message }) => {
@@ -544,7 +542,7 @@ mod tests {
         // The API can return fewer images than asked for. The client returns
         // what it got, and the app shows a message for an empty list.
         let result = client
-            .generate("a lighthouse at dusk", AssetKind::Hero)
+            .generate("a lighthouse at dusk", AssetKind::Hero, 4)
             .await
             .unwrap();
         assert!(result.is_empty());
@@ -561,7 +559,7 @@ mod tests {
             .await;
         let client = OpenAiClient::new(KEY, MODEL, &server.uri());
         let result = client
-            .generate("a lighthouse at dusk", AssetKind::Hero)
+            .generate("a lighthouse at dusk", AssetKind::Hero, 4)
             .await;
         assert!(matches!(result, Err(OpenAiError::Decode(_))), "{result:?}");
     }
@@ -579,7 +577,7 @@ mod tests {
             .await;
         let client = OpenAiClient::new(KEY, MODEL, &server.uri());
         let result = client
-            .generate("a lighthouse at dusk", AssetKind::Hero)
+            .generate("a lighthouse at dusk", AssetKind::Hero, 4)
             .await;
         assert!(matches!(result, Err(OpenAiError::Image(_))), "{result:?}");
     }
@@ -595,7 +593,7 @@ mod tests {
             .await;
         let client = OpenAiClient::new(KEY, MODEL, &server.uri());
         let result = client
-            .generate("a lighthouse at dusk", AssetKind::Hero)
+            .generate("a lighthouse at dusk", AssetKind::Hero, 4)
             .await;
         assert!(
             matches!(result, Err(OpenAiError::MissingImage)),
@@ -618,7 +616,7 @@ mod tests {
         let client =
             OpenAiClient::with_timeout(KEY, MODEL, &server.uri(), Duration::from_millis(100));
         let result = client
-            .generate("a lighthouse at dusk", AssetKind::Hero)
+            .generate("a lighthouse at dusk", AssetKind::Hero, 4)
             .await;
         match result {
             Err(OpenAiError::Request(err)) => assert!(err.is_timeout(), "{err}"),
@@ -648,7 +646,7 @@ mod tests {
         let client =
             OpenAiClient::with_timeout(SECRET, MODEL, &server.uri(), Duration::from_millis(100));
         let err = client
-            .generate("a lighthouse at dusk", AssetKind::Hero)
+            .generate("a lighthouse at dusk", AssetKind::Hero, 4)
             .await
             .unwrap_err();
         assert!(!format!("{err}").contains(SECRET), "{err}");
@@ -667,7 +665,7 @@ mod tests {
             .await;
         let client = OpenAiClient::new(KEY, MODEL, &format!("{}/", server.uri()));
         let result = client
-            .generate("a lighthouse at dusk", AssetKind::Portrait)
+            .generate("a lighthouse at dusk", AssetKind::Portrait, 4)
             .await
             .unwrap();
         assert_eq!(result.len(), 4);
@@ -683,7 +681,7 @@ mod tests {
             .and(body_partial_json(serde_json::json!({
                 "model": MODEL,
                 "prompt": build_prompt("a lighthouse at dusk", AssetKind::Portrait),
-                "n": CANDIDATE_COUNT,
+                "n": 4,
                 "size": "832x1248",
                 "output_format": "png",
             })))
@@ -693,13 +691,53 @@ mod tests {
             .await;
         let client = OpenAiClient::new(KEY, MODEL, &server.uri());
         let result = client
-            .generate("a lighthouse at dusk", AssetKind::Portrait)
+            .generate("a lighthouse at dusk", AssetKind::Portrait, 4)
             .await
             .unwrap();
         assert_eq!(result.len(), 4);
         for image in &result {
             assert_eq!((image.width(), image.height()), (600, 900));
         }
+    }
+
+    #[tokio::test]
+    async fn generate_sends_the_count_as_n() {
+        let server = MockServer::start().await;
+        let images = vec![solid(832, 1248); 2];
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .and(body_partial_json(serde_json::json!({"n": 2})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(images_body(&images)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = OpenAiClient::new(KEY, MODEL, &server.uri());
+        let result = client
+            .generate("a lighthouse at dusk", AssetKind::Portrait, 2)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn modify_sends_the_count_as_n() {
+        let server = MockServer::start().await;
+        let images = vec![solid(1472, 688)];
+        Mock::given(method("POST"))
+            .and(path("/v1/images/edits"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(images_body(&images)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = OpenAiClient::new(KEY, MODEL, &server.uri());
+        let result = client
+            .modify(&solid(920, 430), "make it brighter", AssetKind::Wide, 1)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        let requests = server.received_requests().await.unwrap();
+        let body = String::from_utf8_lossy(&requests[0].body);
+        assert!(body.contains("name=\"n\"\r\n\r\n1\r\n"), "{body}");
     }
 
     #[tokio::test]
@@ -714,7 +752,7 @@ mod tests {
             .await;
         let client = OpenAiClient::new(KEY, MODEL, &server.uri());
         let result = client
-            .generate("a lighthouse at dusk", AssetKind::Hero)
+            .generate("a lighthouse at dusk", AssetKind::Hero, 4)
             .await
             .unwrap();
         assert_eq!(result.len(), 4);
@@ -738,7 +776,7 @@ mod tests {
                 Rgba([0, 0, 0, 0])
             }
         }));
-        let images: Vec<_> = (0..CANDIDATE_COUNT).map(|_| logo.clone()).collect();
+        let images: Vec<_> = (0..4).map(|_| logo.clone()).collect();
         Mock::given(method("POST"))
             .and(path("/v1/images/generations"))
             .and(body_partial_json(serde_json::json!({
@@ -752,7 +790,7 @@ mod tests {
             .await;
         let client = OpenAiClient::new(KEY, MODEL, &server.uri());
         let result = client
-            .generate("a lighthouse at dusk", AssetKind::Logo)
+            .generate("a lighthouse at dusk", AssetKind::Logo, 4)
             .await
             .unwrap();
         assert_eq!(result.len(), 4);

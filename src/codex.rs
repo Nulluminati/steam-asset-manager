@@ -17,7 +17,7 @@ use serde_json::Value;
 
 use crate::assets::AssetKind;
 use crate::imaging;
-use crate::openai::{CANDIDATE_COUNT, kind_hint};
+use crate::openai::kind_hint;
 use crate::steam::paths::{Os, PathEnv, SystemEnv};
 
 /// One Codex run can take several minutes.
@@ -310,7 +310,7 @@ pub enum CodexError {
     WorkDir(std::io::Error),
 }
 
-/// Makes art with four Codex runs at the same time.
+/// Makes art with one Codex run per image, all at the same time.
 #[derive(Clone)]
 pub struct CodexClient {
     runner: Arc<dyn CodexRunner>,
@@ -337,33 +337,36 @@ impl CodexClient {
         }
     }
 
-    /// Makes four new images from `prompt`, ready to write as `kind`.
+    /// Makes `count` new images from `prompt`, ready to write as `kind`.
     pub async fn generate(
         &self,
         prompt: &str,
         kind: AssetKind,
+        count: u8,
     ) -> Result<Vec<DynamicImage>, CodexError> {
-        self.run_all(None, prompt, kind).await
+        self.run_all(None, prompt, kind, count).await
     }
 
-    /// Edits `source` with `prompt` and returns four images ready to write
-    /// as `kind`.
+    /// Edits `source` with `prompt` and returns `count` images ready to
+    /// write as `kind`.
     pub async fn modify(
         &self,
         source: &DynamicImage,
         prompt: &str,
         kind: AssetKind,
+        count: u8,
     ) -> Result<Vec<DynamicImage>, CodexError> {
-        self.run_all(Some(source), prompt, kind).await
+        self.run_all(Some(source), prompt, kind, count).await
     }
 
-    /// Starts four runs at the same time in one temp work folder. One
+    /// Starts `count` runs at the same time in one temp work folder. One
     /// failed run does not hide the images of the others.
     async fn run_all(
         &self,
         source: Option<&DynamicImage>,
         prompt: &str,
         kind: AssetKind,
+        count: u8,
     ) -> Result<Vec<DynamicImage>, CodexError> {
         let work = tempfile::Builder::new()
             .prefix("steam-asset-manager-codex-")
@@ -381,7 +384,7 @@ impl CodexClient {
         let args = exec_args(work.path(), source_path.as_deref(), &text);
 
         let mut runs = tokio::task::JoinSet::new();
-        for _ in 0..CANDIDATE_COUNT {
+        for _ in 0..count {
             runs.spawn(run_one(
                 self.runner.clone(),
                 self.codex_home.clone(),
@@ -810,17 +813,49 @@ mod tests {
         let home = TempDir::new().unwrap();
         let runner = FakeRunner::new(home.path(), vec![Reply::Image(2172, 724)]);
         let client = CodexClient::new(runner.clone(), Some(home.path().to_path_buf()));
-        let images = client.generate("A castle", AssetKind::Hero).await.unwrap();
-        assert_eq!(images.len(), usize::from(CANDIDATE_COUNT));
+        let images = client
+            .generate("A castle", AssetKind::Hero, 4)
+            .await
+            .unwrap();
+        assert_eq!(images.len(), 4);
         for image in &images {
             assert_eq!((image.width(), image.height()), (1920, 620));
         }
         let calls = runner.calls.lock().unwrap();
-        assert_eq!(calls.len(), usize::from(CANDIDATE_COUNT));
+        assert_eq!(calls.len(), 4);
         assert!(!calls[0].contains(&OsString::from("-i")));
         // Each PNG moved out of the Codex folder.
         let left: Vec<_> = walk_pngs(&home.path().join("generated_images"));
         assert!(left.is_empty(), "{left:?}");
+    }
+
+    #[tokio::test]
+    async fn the_run_count_equals_the_requested_count() {
+        for count in 1..=4u8 {
+            let home = TempDir::new().unwrap();
+            let runner = FakeRunner::new(home.path(), vec![Reply::Image(2172, 724)]);
+            let client = CodexClient::new(runner.clone(), Some(home.path().to_path_buf()));
+            let images = client
+                .generate("A castle", AssetKind::Hero, count)
+                .await
+                .unwrap();
+            assert_eq!(images.len(), usize::from(count));
+            assert_eq!(runner.calls.lock().unwrap().len(), usize::from(count));
+        }
+    }
+
+    #[tokio::test]
+    async fn modify_starts_the_requested_number_of_runs() {
+        let home = TempDir::new().unwrap();
+        let runner = FakeRunner::new(home.path(), vec![Reply::Image(900, 1350)]);
+        let client = CodexClient::new(runner.clone(), Some(home.path().to_path_buf()));
+        let source = DynamicImage::ImageRgba8(RgbaImage::new(600, 900));
+        let images = client
+            .modify(&source, "Make it red", AssetKind::Portrait, 2)
+            .await
+            .unwrap();
+        assert_eq!(images.len(), 2);
+        assert_eq!(runner.calls.lock().unwrap().len(), 2);
     }
 
     fn walk_pngs(dir: &Path) -> Vec<PathBuf> {
@@ -845,10 +880,10 @@ mod tests {
         let client = CodexClient::new(runner.clone(), Some(home.path().to_path_buf()));
         let source = DynamicImage::ImageRgba8(RgbaImage::new(600, 900));
         let images = client
-            .modify(&source, "Make it red", AssetKind::Portrait)
+            .modify(&source, "Make it red", AssetKind::Portrait, 4)
             .await
             .unwrap();
-        assert_eq!(images.len(), usize::from(CANDIDATE_COUNT));
+        assert_eq!(images.len(), 4);
         assert_eq!((images[0].width(), images[0].height()), (600, 900));
         let calls = runner.calls.lock().unwrap();
         let args = &calls[0];
@@ -865,7 +900,7 @@ mod tests {
         let home = TempDir::new().unwrap();
         let runner = FakeRunner::new(home.path(), vec![Reply::Fail, Reply::Image(1472, 688)]);
         let client = CodexClient::new(runner, Some(home.path().to_path_buf()));
-        let images = client.generate("x", AssetKind::Wide).await.unwrap();
+        let images = client.generate("x", AssetKind::Wide, 4).await.unwrap();
         assert_eq!(images.len(), 2);
     }
 
@@ -874,7 +909,7 @@ mod tests {
         let home = TempDir::new().unwrap();
         let runner = FakeRunner::new(home.path(), vec![Reply::Fail]);
         let client = CodexClient::new(runner, Some(home.path().to_path_buf()));
-        let err = client.generate("x", AssetKind::Wide).await.unwrap_err();
+        let err = client.generate("x", AssetKind::Wide, 4).await.unwrap_err();
         assert!(matches!(err, CodexError::NoImage(_)), "{err}");
         assert!(err.to_string().contains("usage limit reached"), "{err}");
     }
@@ -884,7 +919,7 @@ mod tests {
         let home = TempDir::new().unwrap();
         let runner = FakeRunner::new(home.path(), vec![Reply::Missing]);
         let client = CodexClient::new(runner, Some(home.path().to_path_buf()));
-        let err = client.generate("x", AssetKind::Logo).await.unwrap_err();
+        let err = client.generate("x", AssetKind::Logo, 4).await.unwrap_err();
         assert!(matches!(err, CodexError::NotInstalled), "{err}");
     }
 
@@ -897,7 +932,7 @@ mod tests {
             Some(home.path().to_path_buf()),
             Duration::from_millis(50),
         );
-        let err = client.generate("x", AssetKind::Logo).await.unwrap_err();
+        let err = client.generate("x", AssetKind::Logo, 4).await.unwrap_err();
         assert!(matches!(err, CodexError::Timeout(_)), "{err}");
     }
 }

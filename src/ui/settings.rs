@@ -1,17 +1,21 @@
 //! The settings dialog: the API keys, the Steam folder override, the image
-//! source and the OpenAI model.
+//! source, the images per request and the OpenAI model.
 
 use std::path::PathBuf;
 
 use iced::widget::{
-    button, center, column, container, mouse_area, opaque, radio, row, space, text, text_input,
+    button, center, column, container, mouse_area, opaque, pick_list, radio, row, space, text,
+    text_input,
 };
 use iced::{Alignment, Color, Element, Length};
 
 use crate::app::{Message, State};
 use crate::codex::{CodexStatus, INSTALL_STEPS};
-use crate::config::{Config, DEFAULT_OPENAI_MODEL, ImageSource};
+use crate::config::{Config, DEFAULT_OPENAI_MODEL, ImageSource, MAX_IMAGES_PER_REQUEST};
 use crate::secrets::{Secrets, Service};
+
+/// The choices of the "Images per request" dropdown.
+pub const IMAGE_COUNT_OPTIONS: [u8; MAX_IMAGES_PER_REQUEST as usize] = [1, 2, 3, 4];
 
 /// One input of the settings dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +41,8 @@ pub struct SettingsForm {
     steam_root: String,
     model: String,
     pub image_source: ImageSource,
+    /// How many images Generate and Modify make.
+    pub images_per_request: u8,
     /// Whether the dialog found the Codex program.
     pub codex: CodexStatus,
     /// The reason the last save failed.
@@ -66,6 +72,7 @@ impl SettingsForm {
                 .unwrap_or_default(),
             model: config.openai_model.clone(),
             image_source: config.image_source,
+            images_per_request: config.images_per_request,
             codex: CodexStatus::Checking,
             error: None,
         }
@@ -121,6 +128,7 @@ impl SettingsForm {
                 model.to_string()
             },
             image_source: self.image_source,
+            images_per_request: self.images_per_request,
         }
     }
 }
@@ -214,6 +222,21 @@ pub fn view<'a>(state: &'a State, form: &'a SettingsForm) -> Element<'a, Message
         }
         fields = fields.push(list);
     }
+
+    fields = fields.push(text("Images per request").size(14));
+    fields = fields.push(
+        pick_list(
+            IMAGE_COUNT_OPTIONS,
+            Some(form.images_per_request),
+            Message::ImagesPerRequestSelected,
+        )
+        .padding(8),
+    );
+    fields = fields.push(
+        text("Generate and Modify make this many images. Each Codex image is one Codex run.")
+            .size(12)
+            .style(text::secondary),
+    );
 
     fields = fields.push(text("OpenAI model").size(14));
     fields = fields.push(
@@ -398,6 +421,29 @@ mod tests {
         let mut form = SettingsForm::new(&secrets(&[]), &Config::default());
         form.image_source = ImageSource::Codex;
         assert_eq!(form.to_config().image_source, ImageSource::Codex);
+    }
+
+    #[test]
+    fn form_opens_with_the_saved_images_per_request() {
+        let config = Config {
+            images_per_request: 3,
+            ..Config::default()
+        };
+        let form = SettingsForm::new(&secrets(&[]), &config);
+        assert_eq!(form.images_per_request, 3);
+    }
+
+    #[test]
+    fn to_config_keeps_the_picked_images_per_request() {
+        let mut form = SettingsForm::new(&secrets(&[]), &Config::default());
+        assert_eq!(form.images_per_request, 1);
+        form.images_per_request = 4;
+        assert_eq!(form.to_config().images_per_request, 4);
+    }
+
+    #[test]
+    fn image_count_options_are_one_to_four() {
+        assert_eq!(IMAGE_COUNT_OPTIONS, [1, 2, 3, 4]);
     }
 
     #[test]
