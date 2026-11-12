@@ -1,8 +1,11 @@
 name: CI
 
 on:
+  # A tag push runs the Release workflow, which calls this workflow; a second run is not needed.
   push:
+    branches: ["**"]
   pull_request:
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
@@ -45,6 +48,10 @@ jobs:
 
       - name: Test
         run: cargo test
+
+      - name: Test the release scripts
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 -I -m unittest discover -s bin/tests
 
       - name: Build release
         run: cargo build --release

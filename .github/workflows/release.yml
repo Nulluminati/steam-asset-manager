@@ -1,0 +1,84 @@
+name: Release
+
+# bin/release.py pushes the tag vX.Y.Z. This workflow checks that the tag matches the version in
+# Cargo.toml, runs CI (the four checks and the release builds on Linux and Windows), packages the
+# archives with a SHA256SUMS file, and publishes a GitHub Release with the CHANGELOG.md section as
+# its notes. A tag with a hyphen, such as v0.2.0-rc.1, gives a pre-release. See docs/releasing.md.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  notes:
+    name: Check the version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check the version and write the release notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: python3 -I bin/release_notes.py "${TAG#v}" > notes.md
+
+      - name: Upload the release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: notes.md
+          if-no-files-found: error
+
+  ci:
+    name: CI
+    needs: notes
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish the release
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download the binaries and the release notes
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package the archives and write SHA256SUMS
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          base="steam-asset-manager-${TAG#v}"
+          mkdir -p dist "staging/linux/$base" "staging/windows/$base"
+          # An artifact does not keep the executable bit, so install sets it again.
+          install -m 755 artifacts/steam-asset-manager-ubuntu-latest/steam-asset-manager "staging/linux/$base/"
+          cp artifacts/steam-asset-manager-windows-latest/steam-asset-manager.exe "staging/windows/$base/"
+          cp README.md LICENSE "staging/linux/$base/"
+          cp README.md LICENSE "staging/windows/$base/"
+          tar -C staging/linux -czf "dist/$base-linux-x86_64.tar.gz" "$base"
+          (cd staging/windows && zip -qrX "../../dist/$base-windows-x86_64.zip" "$base")
+          (cd dist && sha256sum -- * > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          prerelease=()
+          if [[ "$TAG" == *-* ]]; then prerelease=(--prerelease); fi
+          gh release create "$TAG" --verify-tag --title "$TAG" \
+            --notes-file artifacts/release-notes/notes.md "${prerelease[@]}" dist/*

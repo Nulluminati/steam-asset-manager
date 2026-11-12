@@ -119,6 +119,12 @@ The approved UI layout is `docs/mockup-main-screen.png`.
 - `tests/fixtures/libraries/{a,b}/`: two library folders with app
   manifests. Tests write a `libraryfolders.vdf` that points at them, because
   that file holds absolute paths.
+- `bin/release.py` and `bin/release_notes.py`: the release scripts (Python
+  standard library only). `bin/tests/` holds their `unittest` tests.
+- `skills/steam-asset-manager-release/SKILL.md`: how an agent cuts a release.
+- `.github/workflows/release.yml`: on a `v*` tag, checks the version, calls
+  `ci.yml`, packages the archives and `SHA256SUMS`, and publishes the GitHub
+  Release.
 
 Update this map when a card adds or moves a module.
 
@@ -133,6 +139,20 @@ cargo build --release
 
 All four must pass with clean output. CI (`.github/workflows/ci.yml`) runs
 them on Linux and Windows.
+
+The release scripts have their own tests. CI runs them on Linux:
+
+```sh
+python3 -I -m unittest discover -s bin/tests
+```
+
+## Releases
+
+Read `docs/releasing.md`. To cut a release, follow
+`skills/steam-asset-manager-release/SKILL.md`: you pick the version and write
+the `CHANGELOG.md` section, the user approves, then `bin/release.py X.Y.Z`
+commits, tags and pushes. Never edit the version in `Cargo.toml` by hand, and
+never commit a release yourself.
 
 ## Rules
 

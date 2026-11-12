@@ -62,25 +62,35 @@ plan allowance, which is why the default is 1.
 
 The app runs on Linux and Windows. macOS is not supported.
 
-### Windows download
+### Download a release
 
-Every CI run builds a Windows executable. The repository is private, so you
-need a GitHub account with access to it.
+Each release on the
+[Releases page](https://github.com/Nulluminati/steam-asset-manager/releases)
+has a Windows zip, a Linux archive and a `SHA256SUMS` file. The repository is
+private, so you need a GitHub account with access to it.
 
-1. Open the [CI runs on `main`](https://github.com/Nulluminati/steam-asset-manager/actions/workflows/ci.yml?query=branch%3Amain+is%3Asuccess).
-2. Open the newest run.
-3. Under "Artifacts", download `steam-asset-manager-windows-latest`.
-4. Unzip it and run `steam-asset-manager.exe`.
+1. Download `steam-asset-manager-X.Y.Z-windows-x86_64.zip` (or
+   `steam-asset-manager-X.Y.Z-linux-x86_64.tar.gz` on Linux).
+2. Unzip it.
+3. Run `steam-asset-manager.exe` (or `steam-asset-manager` on Linux).
 
-With the [GitHub CLI](https://cli.github.com/) and a Bash shell (Git Bash
-works), this downloads the same file:
+The Windows executable is not signed, so Microsoft Defender SmartScreen warns
+you the first time. Select "More info", then "Run anyway".
+
+With the [GitHub CLI](https://cli.github.com/), this downloads the newest
+Windows zip:
 
 ```sh
-run=$(gh run list -R Nulluminati/steam-asset-manager --workflow ci.yml --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId')
-gh run download "$run" -R Nulluminati/steam-asset-manager -n steam-asset-manager-windows-latest
+gh release download -R Nulluminati/steam-asset-manager -p '*windows-x86_64.zip'
 ```
 
-The same runs also hold a Linux build, `steam-asset-manager-ubuntu-latest`.
+### Builds between releases
+
+Every CI run on `main` also builds the app. Open the
+[CI runs on `main`](https://github.com/Nulluminati/steam-asset-manager/actions/workflows/ci.yml?query=branch%3Amain+is%3Asuccess),
+open the newest run, and download `steam-asset-manager-windows-latest` or
+`steam-asset-manager-ubuntu-latest` under "Artifacts". These builds have no
+version, and GitHub deletes them after 90 days.
 
 ### Build from source
 
@@ -176,3 +186,10 @@ cargo build --release
 Tests never touch a real Steam folder, the real keyring or a real API. They
 use the fake Steam root in `tests/fixtures/steam/`, temp folders and mock
 HTTP servers.
+
+Releases are described in [`docs/releasing.md`](docs/releasing.md), and the
+changes per version in [`CHANGELOG.md`](CHANGELOG.md).
+
+## License
+
+[MIT](LICENSE).
