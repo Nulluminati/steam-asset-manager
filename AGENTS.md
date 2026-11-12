@@ -139,6 +139,9 @@ cargo build --release
 
 All four must pass with clean output. CI (`.github/workflows/ci.yml`) runs
 them on Linux and Windows.
+CI also runs gitleaks over the full history (`Secret scan (gitleaks)`).
+Never commit real Steam IDs, account names or keys; tests use made-up
+values.
 
 The release scripts have their own tests. CI runs them on Linux:
 
