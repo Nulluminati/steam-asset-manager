@@ -14,6 +14,11 @@
   <img src="https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-blue" alt="Platforms: Linux and Windows">
 </p>
 
+![The main screen with SteamGridDB results for Portal 2](docs/images/candidates.png)
+
+*The screenshots come from a Linux run with a test library. The game art is
+Steam's own; the SteamGridDB results are stand-ins.*
+
 ## What it does
 
 Steam shows four pieces of art for each game in your library. This app lets
@@ -31,6 +36,8 @@ four slots. That is your custom art if you have some, otherwise Steam's own.
 When you apply a new image, the app crops and resizes it to the exact Steam
 size (a logo gets its transparent borders trimmed instead) and writes it to
 `userdata/<account id>/config/grid/` in your Steam folder.
+
+![A selected game with its four slots](docs/images/main.png)
 
 ## Features
 
@@ -111,6 +118,8 @@ You do not need to point the app at Steam. It finds the Steam folder on its
 own (on Windows from the registry, on Linux from the usual paths, Flatpak
 included) and uses the account that signed in last. If it picks the wrong
 folder, set "Steam folder" in Settings.
+
+![The Settings dialog](docs/images/settings.png)
 
 ### Codex image source
 
